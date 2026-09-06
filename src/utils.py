@@ -9,6 +9,8 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.ndimage import label
 from scipy.optimize import linear_sum_assignment
+from sklearn.cluster import DBSCAN, MeanShift
+from sklearn.decomposition import PCA
 from torchvision import models
 from torchvision.models import ResNet18_Weights
 
@@ -21,6 +23,41 @@ def get_device():
         return torch.device("cuda")
     else:
         return torch.device("cpu")
+
+
+# --- Modularização da Cabeça (Head) do Modelo ---
+
+def create_segmentation_head(in_channels=32, out_channels=1, head_type="conv1x1", dropout=0.0):
+    """
+    Função modular para construção da cabeça (head) de predição da U-Net.
+    
+    Parâmetros:
+      - in_channels: Número de canais de entrada provenientes do último DecoderBlock (padrão 32).
+      - out_channels: Número de canais de saída:
+          * 1 para segmentação binária (Partes 0 e 1).
+          * 1 + D para Trilha B (Canal 0: logits de primeiro plano, Canais 1..D: vetor de embedding).
+      - head_type: 'conv1x1' (padrão) ou 'conv3x3' com BatchNorm e ReLU.
+      - dropout: Taxa de dropout opcional (padrão 0.0).
+    """
+    if head_type == "conv1x1":
+        if dropout > 0:
+            return nn.Sequential(
+                nn.Dropout2d(p=dropout),
+                nn.Conv2d(in_channels, out_channels, kernel_size=1)
+            )
+        return nn.Conv2d(in_channels, out_channels, kernel_size=1)
+    elif head_type == "conv3x3":
+        layers = [
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(in_channels),
+            nn.ReLU(inplace=True),
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout2d(p=dropout))
+        layers.append(nn.Conv2d(in_channels, out_channels, kernel_size=1))
+        return nn.Sequential(*layers)
+    else:
+        raise ValueError(f"Tipo de head '{head_type}' não reconhecido. Use 'conv1x1' ou 'conv3x3'.")
 
 
 # --- Arquitetura U-Net com Backbone ResNet18 ---
@@ -46,7 +83,7 @@ class DecoderBlock(nn.Module):
 
 
 class UNetResNet(nn.Module):
-    def __init__(self, out_channels=1, pretrained=True, freeze_backbone=True):
+    def __init__(self, out_channels=1, pretrained=True, freeze_backbone=True, head=None, head_type="conv1x1"):
         super().__init__()
         backbone = models.resnet18(weights=ResNet18_Weights.DEFAULT if pretrained else None)
 
@@ -80,7 +117,12 @@ class UNetResNet(nn.Module):
         self.up2 = DecoderBlock(128, 64, 64)
         self.up1 = DecoderBlock(64, 64, 32)
         self.up0 = DecoderBlock(32, 32, 32)
-        self.head = nn.Conv2d(32, out_channels, kernel_size=1)
+        
+        # Cabeça modularizada com suporte a injeção externa ou geração automática
+        if head is not None:
+            self.head = head
+        else:
+            self.head = create_segmentation_head(32, out_channels, head_type=head_type)
 
     def forward(self, x):
         x = x.contiguous()
@@ -657,6 +699,475 @@ def plot_quantify_failure(results, dataset_name="Reais"):
     plt.xlabel('Densidade de Objetos na Imagem (Num GT)')
     plt.ylabel('Erro Absoluto de Contagem (|Pred - GT|)')
     plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
+
+# =============================================================================
+# --- PARTE 2: TRILHA B — EMBEDDINGS DISCRIMINATIVOS ---
+# =============================================================================
+
+class DiscriminativeLoss(nn.Module):
+    """
+    Função de Perda Discriminativa baseada em De Brabandere et al. (2017):
+    'Semantic Instance Segmentation with a Discriminative Loss Function'.
+
+    A rede produz (1 + D) canais:
+      - Canal 0: Logits de primeiro plano (Foreground) otimizado com BCEWithLogitsLoss.
+      - Canais 1..D: Vetores de embedding D-dimensionais por pixel.
+
+    A perda discriminativa é composta por três termos:
+      1. L_var (Variância): Puxa pixels da mesma instância para o centroide da instância (margem delta_v).
+      2. L_dist (Distância): Empurra centroides de instâncias diferentes para longe (margem 2 * delta_d).
+      3. L_reg (Regularização): Mantém os centroides próximos da origem para evitar dispersão infinita.
+    """
+    def __init__(self, delta_v=0.5, delta_d=1.5, alpha=1.0, beta=1.0, gamma=0.001, bce_weight=1.0):
+        super().__init__()
+        self.delta_v = delta_v
+        self.delta_d = delta_d
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.bce_weight = bce_weight
+        self.bce = nn.BCEWithLogitsLoss()
+
+    def forward(self, pred, targets):
+        """
+        Parâmetros:
+          pred: Tensor (B, 1 + D, H, W) com canal 0 (fg) e canais 1..D (embeddings).
+          targets: Tensor (B, H, W) contendo máscaras rotuladas por instância (0: Fundo, 1..N: Instâncias).
+        """
+        B, C, H, W = pred.shape
+        fg_logits = pred[:, 0, :, :]
+        embeddings = pred[:, 1:, :, :]
+
+        gt_fg = (targets > 0).float()
+        loss_bce = self.bce(fg_logits, gt_fg)
+
+        total_var = torch.tensor(0.0, device=pred.device)
+        total_dist = torch.tensor(0.0, device=pred.device)
+        total_reg = torch.tensor(0.0, device=pred.device)
+        valid_samples = 0
+
+        for b in range(B):
+            target_b = targets[b]
+            emb_b = embeddings[b]  # (D, H, W)
+
+            unique_labels = torch.unique(target_b)
+            unique_labels = unique_labels[unique_labels > 0]
+            num_instances = len(unique_labels)
+
+            if num_instances == 0:
+                continue
+
+            valid_samples += 1
+            centroids = []
+            loss_var_b = torch.tensor(0.0, device=pred.device)
+
+            for uid in unique_labels:
+                mask_c = (target_b == uid)
+                emb_c = emb_b[:, mask_c]  # (D, N_c)
+                mu_c = emb_c.mean(dim=1, keepdim=True)  # (D, 1)
+                centroids.append(mu_c.squeeze(1))
+
+                # Distância euclidiana com epsilon para estabilidade de gradientes (evita NaN no sqrt)
+                diff = emb_c - mu_c
+                dist_to_centroid = torch.sqrt(torch.sum(diff ** 2, dim=0) + 1e-8)
+                var_c = torch.clamp(dist_to_centroid - self.delta_v, min=0.0) ** 2
+                loss_var_b = loss_var_b + var_c.mean()
+
+            loss_var_b = loss_var_b / num_instances
+            total_var = total_var + loss_var_b
+
+            mu = torch.stack(centroids, dim=0)  # (num_instances, D)
+
+            # Termo de Regularização: penaliza norma L2 dos centroides
+            norm_mu = torch.sqrt(torch.sum(mu ** 2, dim=1) + 1e-8)
+            loss_reg_b = norm_mu.mean()
+            total_reg = total_reg + loss_reg_b
+
+            # Termo de Distância: empurra centroides distintos para além de 2 * delta_d
+            if num_instances > 1:
+                diff_centroids = mu.unsqueeze(1) - mu.unsqueeze(0)  # (N, N, D)
+                dist_centroids = torch.sqrt(torch.sum(diff_centroids ** 2, dim=2) + 1e-8)
+                dist_hinge = torch.clamp(2.0 * self.delta_d - dist_centroids, min=0.0) ** 2
+
+                eye = torch.eye(num_instances, dtype=torch.bool, device=pred.device)
+                dist_hinge = dist_hinge.masked_fill(eye, 0.0)
+
+                loss_dist_b = dist_hinge.sum() / (num_instances * (num_instances - 1))
+                total_dist = total_dist + loss_dist_b
+
+        if valid_samples > 0:
+            total_var = total_var / valid_samples
+            total_dist = total_dist / valid_samples
+            total_reg = total_reg / valid_samples
+
+        total_loss = (self.bce_weight * loss_bce +
+                      self.alpha * total_var +
+                      self.beta * total_dist +
+                      self.gamma * total_reg)
+
+        breakdown = {
+            "loss": total_loss.item(),
+            "bce": loss_bce.item(),
+            "var": total_var.item(),
+            "dist": total_dist.item(),
+            "reg": total_reg.item(),
+        }
+
+        return total_loss, breakdown
+
+
+def decodificar_embeddings_trilha_b(fg_prob, embeddings, threshold_fg=0.5,
+                                    eps=0.5, min_samples=10, min_instance_size=5,
+                                    method="dbscan"):
+    """
+    Decodifica as instâncias a partir dos embeddings e da máscara de primeiro plano.
+    Aplica clustering (DBSCAN por padrão) sobre os pixels de primeiro plano (foreground).
+
+    O clustering na inferência NÃO precisa saber o número de objetos:
+    O DBSCAN agrupa pixels contíguos no espaço D-dimensional com densidade suficiente
+    delimitada pelo raio eps (tipicamente alinhado com a margem de variância delta_v).
+    """
+    if embeddings.shape[0] < embeddings.shape[-1]:
+        embeddings = np.transpose(embeddings, (1, 2, 0))  # (H, W, D)
+
+    H, W, D = embeddings.shape
+    fg_mask = (fg_prob > threshold_fg)
+
+    if not np.any(fg_mask):
+        return np.zeros((H, W), dtype=np.int32), 0
+
+    coords = np.argwhere(fg_mask)  # (N_fg, 2)
+    fg_embs = embeddings[fg_mask]  # (N_fg, D)
+
+    if method == "dbscan":
+        clusterer = DBSCAN(eps=eps, min_samples=min_samples)
+        cluster_labels = clusterer.fit_predict(fg_embs)
+    elif method == "meanshift":
+        clusterer = MeanShift(bandwidth=eps, bin_seeding=True)
+        cluster_labels = clusterer.fit_predict(fg_embs)
+    else:
+        raise ValueError(f"Método de clustering desconhecido: {method}")
+
+    labeled_mask = np.zeros((H, W), dtype=np.int32)
+    current_id = 1
+
+    unique_clusters = np.unique(cluster_labels)
+    for cid in unique_clusters:
+        if cid == -1:  # ruído no DBSCAN
+            continue
+        inst_coords = coords[cluster_labels == cid]
+        if len(inst_coords) >= min_instance_size:
+            labeled_mask[inst_coords[:, 0], inst_coords[:, 1]] = current_id
+            current_id += 1
+
+    return labeled_mask, current_id - 1
+
+
+def train_model_trilha_b(model, X_train, y_train, X_val, y_val, device,
+                         num_epochs=10, batch_size=8, learning_rate=0.001,
+                         delta_v=0.5, delta_d=1.5, alpha=1.0, beta=1.0,
+                         gamma=0.001, bce_weight=1.0):
+    """
+    Treina o modelo U-Net para a Trilha B (Embeddings Discriminativos).
+    Monitora a perda total e o detalhamento dos componentes (BCE, Variância, Distância).
+    """
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    criterion = DiscriminativeLoss(
+        delta_v=delta_v, delta_d=delta_d, alpha=alpha,
+        beta=beta, gamma=gamma, bce_weight=bce_weight
+    )
+
+    num_train = X_train.shape[0]
+    num_val = X_val.shape[0]
+
+    for epoch in range(num_epochs):
+        model.train()
+        train_loss = 0.0
+        train_bce = 0.0
+        train_var = 0.0
+        train_dist = 0.0
+        train_batches = int(np.ceil(num_train / batch_size))
+
+        for i in range(train_batches):
+            batch_images = X_train[i * batch_size:(i + 1) * batch_size]
+            batch_masks = y_train[i * batch_size:(i + 1) * batch_size]
+
+            batch_images_tensor = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+            batch_masks_tensor = torch.from_numpy(batch_masks).long().contiguous().to(device)
+
+            optimizer.zero_grad()
+            outputs = model(batch_images_tensor)
+            loss, breakdown = criterion(outputs, batch_masks_tensor)
+            loss.backward()
+            optimizer.step()
+
+            train_loss += breakdown["loss"] * len(batch_images)
+            train_bce += breakdown["bce"] * len(batch_images)
+            train_var += breakdown["var"] * len(batch_images)
+            train_dist += breakdown["dist"] * len(batch_images)
+
+        train_loss /= num_train
+        train_bce /= num_train
+        train_var /= num_train
+        train_dist /= num_train
+
+        model.eval()
+        val_loss = 0.0
+        val_batches = int(np.ceil(num_val / batch_size))
+
+        with torch.no_grad():
+            for i in range(val_batches):
+                batch_images = X_val[i * batch_size:(i + 1) * batch_size]
+                batch_masks = y_val[i * batch_size:(i + 1) * batch_size]
+
+                batch_images_tensor = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+                batch_masks_tensor = torch.from_numpy(batch_masks).long().contiguous().to(device)
+
+                outputs = model(batch_images_tensor)
+                loss, breakdown = criterion(outputs, batch_masks_tensor)
+                val_loss += breakdown["loss"] * len(batch_images)
+
+        val_loss /= num_val
+        print(f"Epoch [{epoch + 1:2d}/{num_epochs:2d}] | Train Loss: {train_loss:.4f} (BCE: {train_bce:.3f}, Var: {train_var:.3f}, Dist: {train_dist:.3f}) | Val Loss: {val_loss:.4f}")
+
+
+def evaluate_instance_metrics_single_trilha_b(fg_prob, embeddings, mask_gt,
+                                             threshold_fg=0.5, eps=0.5, min_samples=10,
+                                             min_instance_size=5,
+                                             iou_thresholds=np.arange(0.50, 1.00, 0.05),
+                                             matching_method="hungarian"):
+    """Avalia uma única imagem da Trilha B calculando mAP@[.50:.95] e erro de contagem via DBSCAN."""
+    pred_labeled, num_pred = decodificar_embeddings_trilha_b(
+        fg_prob, embeddings, threshold_fg=threshold_fg, eps=eps,
+        min_samples=min_samples, min_instance_size=min_instance_size
+    )
+
+    gt_labeled = mask_gt.astype(np.int32)
+    unique_gt = np.unique(gt_labeled[gt_labeled > 0])
+    num_gt = len(unique_gt)
+
+    count_error = abs(num_pred - num_gt)
+
+    if num_gt == 0 and num_pred == 0:
+        aps = np.ones(len(iou_thresholds), dtype=np.float32)
+        return 1.0, count_error, num_gt, num_pred, aps
+    elif num_gt == 0 or num_pred == 0:
+        aps = np.zeros(len(iou_thresholds), dtype=np.float32)
+        return 0.0, count_error, num_gt, num_pred, aps
+
+    iou_matrix = calculate_instance_iou_matrix(gt_labeled, num_gt, pred_labeled, num_pred)
+
+    aps = []
+    for t in iou_thresholds:
+        if matching_method == "greedy":
+            tp = match_instances_greedy(iou_matrix, t)
+        elif matching_method == "hungarian":
+            tp = match_instances_hungarian(iou_matrix, t)
+        else:
+            raise ValueError(f"Método de matching desconhecido: {matching_method}")
+
+        fp = num_pred - tp
+        fn = num_gt - tp
+        denom = tp + fp + fn
+        ap_t = tp / denom if denom > 0 else 0.0
+        aps.append(ap_t)
+
+    aps = np.array(aps, dtype=np.float32)
+    mAP = float(np.mean(aps))
+    return mAP, count_error, num_gt, num_pred, aps
+
+
+def evaluate_model_instances_trilha_b(model, X, y, device,
+                                     threshold_fg=0.5, eps=0.5, min_samples=10,
+                                     min_instance_size=5,
+                                     iou_thresholds=np.arange(0.50, 1.00, 0.05),
+                                     matching_method="hungarian"):
+    """Avalia o modelo da Trilha B em todo o conjunto de teste em nível de instâncias."""
+    model.eval()
+    mAP_list = []
+    count_error_list = []
+    num_gt_list = []
+    num_pred_list = []
+    aps_matrix = []
+
+    t0 = time.time()
+    with torch.no_grad():
+        for i in range(len(X)):
+            img = X[i]
+            mask_gt = y[i]
+
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).contiguous().to(device) / 255.0
+            outputs = model(img_tensor)
+
+            fg_prob = torch.sigmoid(outputs[:, 0, :, :]).squeeze(0).cpu().numpy()
+            embeddings = outputs[:, 1:, :, :].squeeze(0).cpu().numpy()  # (D, H, W)
+
+            mAP, count_err, num_gt, num_pred, aps = evaluate_instance_metrics_single_trilha_b(
+                fg_prob, embeddings, mask_gt,
+                threshold_fg=threshold_fg, eps=eps, min_samples=min_samples,
+                min_instance_size=min_instance_size,
+                iou_thresholds=iou_thresholds, matching_method=matching_method
+            )
+
+            mAP_list.append(mAP)
+            count_error_list.append(count_err)
+            num_gt_list.append(num_gt)
+            num_pred_list.append(num_pred)
+            aps_matrix.append(aps)
+
+    elapsed_time = time.time() - t0
+    mean_aps_per_threshold = np.mean(aps_matrix, axis=0)
+
+    results = {
+        "mean_mAP": float(np.mean(mAP_list)),
+        "mean_count_error": float(np.mean(count_error_list)),
+        "elapsed_time": elapsed_time,
+        "mAP_list": np.array(mAP_list),
+        "count_error_list": np.array(count_error_list),
+        "num_gt_list": np.array(num_gt_list),
+        "num_pred_list": np.array(num_pred_list),
+        "iou_thresholds": iou_thresholds,
+        "mean_aps_per_threshold": mean_aps_per_threshold,
+        "matching_method": matching_method,
+    }
+
+    return results
+
+
+def plot_trilha_b_predictions(model, X, y, device, num_samples=3,
+                              threshold_fg=0.5, eps=0.5, min_samples=10):
+    """
+    Exibe visualizações completas da Trilha B para amostras de teste:
+      1. Imagem original.
+      2. Ground Truth de instâncias.
+      3. Probabilidade de primeiro plano predita.
+      4. Projeção 2D (PCA) dos embeddings colorida pelas instâncias.
+      5. Instâncias finais decodificadas por clustering (DBSCAN).
+    """
+    model.eval()
+    with torch.no_grad():
+        for i in range(min(num_samples, len(X))):
+            img = X[i]
+            mask_gt = y[i]
+
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).contiguous().to(device) / 255.0
+            outputs = model(img_tensor)
+
+            fg_prob = torch.sigmoid(outputs[:, 0, :, :]).squeeze(0).cpu().numpy()
+            embeddings = outputs[:, 1:, :, :].squeeze(0).cpu().numpy()  # (D, H, W)
+
+            pred_labeled, num_pred = decodificar_embeddings_trilha_b(
+                fg_prob, embeddings, threshold_fg=threshold_fg, eps=eps, min_samples=min_samples
+            )
+            num_gt = len(np.unique(mask_gt[mask_gt > 0]))
+
+            # Projeção PCA dos embeddings nos pixels de primeiro plano
+            fg_mask = (fg_prob > threshold_fg)
+            pca_img = np.zeros((img.shape[0], img.shape[1], 3), dtype=np.float32)
+            if np.any(fg_mask) and embeddings.shape[0] >= 3:
+                fg_embs = embeddings[:, fg_mask].T  # (N_fg, D)
+                if len(fg_embs) >= 3:
+                    pca = PCA(n_components=3)
+                    embs_pca = pca.fit_transform(fg_embs)
+                    # Normaliza para [0, 1] em RGB
+                    embs_pca = (embs_pca - embs_pca.min(axis=0)) / (embs_pca.max(axis=0) - embs_pca.min(axis=0) + 1e-8)
+                    coords = np.argwhere(fg_mask)
+                    pca_img[coords[:, 0], coords[:, 1]] = embs_pca
+
+            plt.figure(figsize=(18, 3.5))
+
+            plt.subplot(1, 5, 1)
+            plt.imshow(img)
+            plt.title(f'Imagem {i+1}')
+            plt.axis('off')
+
+            plt.subplot(1, 5, 2)
+            plt.imshow(mask_gt, cmap='nipy_spectral')
+            plt.title(f'GT ({num_gt} objetos)')
+            plt.axis('off')
+
+            plt.subplot(1, 5, 3)
+            plt.imshow(fg_prob, cmap='magma', vmin=0, vmax=1)
+            plt.title('Prob. Primeiro Plano')
+            plt.axis('off')
+
+            plt.subplot(1, 5, 4)
+            plt.imshow(pca_img)
+            plt.title('PCA 3D dos Embeddings')
+            plt.axis('off')
+
+            plt.subplot(1, 5, 5)
+            plt.imshow(pred_labeled, cmap='nipy_spectral')
+            plt.title(f'Instâncias DBSCAN ({num_pred} pred)')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+
+
+def compare_baseline_vs_trilha_b(res_baseline, res_trilha_b, dataset_name="Reais (DSB2018)"):
+    """Exibe tabela comparativa e gráficos de desempenho entre a Baseline e a Trilha B."""
+    mAP_base = res_baseline["mean_mAP"]
+    mAP_b = res_trilha_b["mean_mAP"]
+
+    err_base = res_baseline["mean_count_error"]
+    err_b = res_trilha_b["mean_count_error"]
+
+    iou_thresh = res_baseline["iou_thresholds"]
+    idx_50 = np.where(np.isclose(iou_thresh, 0.50))[0][0]
+    idx_75 = np.where(np.isclose(iou_thresh, 0.75))[0][0]
+
+    ap50_base = res_baseline["mean_aps_per_threshold"][idx_50]
+    ap50_b = res_trilha_b["mean_aps_per_threshold"][idx_50]
+
+    ap75_base = res_baseline["mean_aps_per_threshold"][idx_75]
+    ap75_b = res_trilha_b["mean_aps_per_threshold"][idx_75]
+
+    print("=" * 77)
+    print(f"  COMPARAÇÃO: BASELINE (Parte 1) vs TRILHA B (Parte 2: Embeddings Discriminativos)")
+    print(f"  Dataset: {dataset_name}")
+    print("=" * 77)
+    print(f"{'Métrica':<32} | {'Baseline (Ingênua)':<20} | {'Trilha B (Embeddings)':<20}")
+    print("-" * 77)
+    print(f"{'mAP@[.50:.95]':<32} | {mAP_base:<20.4f} | {mAP_b:<20.4f}")
+    print(f"{'Erro Médio de Contagem (abs)':<32} | {err_base:<20.2f} | {err_b:<20.2f}")
+    print(f"{'AP @ IoU=0.50':<32} | {ap50_base:<20.4f} | {ap50_b:<20.4f}")
+    print(f"{'AP @ IoU=0.75':<32} | {ap75_base:<20.4f} | {ap75_b:<20.4f}")
+    print("=" * 77)
+
+    # Gráfico comparativo de AP por limiar de IoU
+    plt.figure(figsize=(12, 4.5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(iou_thresh, res_baseline["mean_aps_per_threshold"], "o-", color="crimson", label=f"Baseline (mAP={mAP_base:.4f})")
+    plt.plot(iou_thresh, res_trilha_b["mean_aps_per_threshold"], "s-", color="dodgerblue", label=f"Trilha B: Embeddings (mAP={mAP_b:.4f})")
+    plt.title(f"Curva AP vs. Limiar de IoU ({dataset_name})")
+    plt.xlabel("Limiar de IoU")
+    plt.ylabel("AP Médio")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    labels = ['mAP@[.50:.95]', 'AP@0.50', 'AP@0.75']
+    base_vals = [mAP_base, ap50_base, ap75_base]
+    b_vals = [mAP_b, ap50_b, ap75_b]
+
+    x = np.arange(len(labels))
+    width = 0.35
+
+    plt.bar(x - width/2, base_vals, width, label='Baseline', color='crimson', alpha=0.85)
+    plt.bar(x + width/2, b_vals, width, label='Trilha B (Embeddings)', color='dodgerblue', alpha=0.85)
+    plt.title(f"Comparação de Métricas ({dataset_name})")
+    plt.xticks(x, labels)
+    plt.ylabel("Score")
+    plt.ylim(0, 1.0)
+    plt.grid(True, linestyle="--", alpha=0.5, axis='y')
     plt.legend()
 
     plt.tight_layout()
