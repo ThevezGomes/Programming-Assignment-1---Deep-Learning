@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+from scipy.ndimage import label
 from torchvision import models
 from torchvision.models import ResNet18_Weights
 
@@ -195,7 +196,25 @@ def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42):
     return X_train, y_train, X_val, y_val, X_test, y_test
 
 
-# --- Treinamento e Métricas de Avaliação ---
+# --- Treinamento, Métricas e Extração de Instâncias Ingênua ---
+
+def extract_instances_naive(pred_prob, threshold=0.5):
+    """
+    Método Ingênuo de Extração de Instâncias: Limiarização + Componentes Conexos.
+    
+    Args:
+        pred_prob (np.ndarray): Mapa de probabilidade 2D (H, W) com valores entre 0.0 e 1.0.
+        threshold (float): Limiar para binarização.
+        
+    Returns:
+        labeled_mask (np.ndarray): Máscara 2D (H, W) onde 0 é fundo e cada instância tem ID inteiro único (1, 2, ..., N).
+        num_instances (int): Quantidade total de instâncias isoladas identificadas.
+    """
+    binary_mask = pred_prob > threshold
+    structure = np.ones((3, 3), dtype=int)  # 8-conectividade
+    labeled_mask, num_instances = label(binary_mask, structure=structure)
+    return labeled_mask, num_instances
+
 
 def train_model(model, X_train, y_train, X_val, y_val, device, num_epochs=10, batch_size=8, learning_rate=0.001):
     """
@@ -320,9 +339,9 @@ def plot_dataset_samples(X_train, y_train, X_val, y_val, X_test, y_test):
 
     plt.tight_layout()
     plt.show()
+    
 
-
-def plot_predictions(model, X_test, y_test, device, num_samples=5):
+def plot_predictions(model, X_test, y_test, device, num_samples=5, threshold=0.5):
     """
     Visualiza as predições do modelo nas amostras do conjunto de teste comparando com o Ground Truth.
     """
@@ -337,10 +356,10 @@ def plot_predictions(model, X_test, y_test, device, num_samples=5):
 
             output = model(img_tensor)
             output_mask = torch.sigmoid(output).squeeze().cpu().numpy()
-            output_mask_binary = (output_mask > 0.5).astype(np.uint8) * 255
+            output_mask_binary = (output_mask > threshold).astype(np.uint8) * 255
 
             y_t = (mask > 127).astype(np.float32)
-            y_p = (output_mask > 0.5).astype(np.float32)
+            y_p = (output_mask > threshold).astype(np.float32)
             dice_val = calculate_dice_coefficient(y_t, y_p)
             iou_val = calculate_iou(y_t, y_p)
 
@@ -358,6 +377,48 @@ def plot_predictions(model, X_test, y_test, device, num_samples=5):
             plt.subplot(1, 3, 3)
             plt.imshow(output_mask_binary, cmap='gray')
             plt.title(f'Predição (Dice: {dice_val:.3f}, IoU: {iou_val:.3f})')
+            plt.axis('off')
+
+            plt.tight_layout()
+            plt.show()
+
+
+def plot_naive_instance_extraction(model, X_test, y_test, device, num_samples=3, threshold=0.5):
+    """
+    Exibe a extração de instâncias usando o Método Ingênuo (Limiar + Componentes Conexos).
+    """
+    model.eval()
+
+    with torch.no_grad():
+        for i in range(min(num_samples, len(X_test))):
+            img = X_test[i]
+            mask = y_test[i]
+
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+            output = model(img_tensor)
+            pred_prob = torch.sigmoid(output).squeeze().cpu().numpy()
+
+            # Método ingênuo: limiar + componentes conexos
+            labeled_mask, num_instances = extract_instances_naive(pred_prob, threshold=threshold)
+
+            # Instâncias reais ground truth no mask
+            gt_binary = mask > 127
+            gt_labeled, num_gt_instances = label(gt_binary, structure=np.ones((3, 3), dtype=int))
+
+            plt.figure(figsize=(12, 3.5))
+            plt.subplot(1, 3, 1)
+            plt.imshow(img)
+            plt.title(f'Imagem {i+1}')
+            plt.axis('off')
+
+            plt.subplot(1, 3, 2)
+            plt.imshow(gt_labeled, cmap='nipy_spectral')
+            plt.title(f'GT Instâncias ({num_gt_instances} objetos)')
+            plt.axis('off')
+
+            plt.subplot(1, 3, 3)
+            plt.imshow(labeled_mask, cmap='nipy_spectral')
+            plt.title(f'Instâncias Ingênuas ({num_instances} detectadas)')
             plt.axis('off')
 
             plt.tight_layout()
