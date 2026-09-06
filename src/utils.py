@@ -14,9 +14,7 @@ from torchvision.models import ResNet18_Weights
 
 
 def get_device():
-    """
-    Retorna o dispositivo acelerado disponível (MPS para Mac, CUDA para GPU NVIDIA, ou CPU).
-    """
+    """Retorna o dispositivo acelerado disponível (MPS, CUDA ou CPU)."""
     if torch.backends.mps.is_available() and torch.backends.mps.is_built():
         return torch.device("mps")
     elif torch.cuda.is_available():
@@ -57,7 +55,14 @@ class UNetResNet(nn.Module):
                 param.requires_grad = False
 
         self.backbone = backbone
-        self.encoder0 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu, backbone.maxpool)
+        # Resoluções reais do encoder: input(H/1, 3ch), stem_skip(H/1, 32ch), encoder_conv1(H/2, 64ch), encoder0(H/4, 64ch), encoder1(H/4, 64ch), encoder2(H/8, 128ch), encoder3(H/16, 256ch), encoder4(H/32, 512ch).
+        self.stem_skip = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+        )
+        self.encoder_conv1 = nn.Sequential(backbone.conv1, backbone.bn1, backbone.relu)
+        self.encoder0 = backbone.maxpool
         self.encoder1 = backbone.layer1
         self.encoder2 = backbone.layer2
         self.encoder3 = backbone.layer3
@@ -73,22 +78,27 @@ class UNetResNet(nn.Module):
         self.up4 = DecoderBlock(512, 256, 256)
         self.up3 = DecoderBlock(256, 128, 128)
         self.up2 = DecoderBlock(128, 64, 64)
-        self.up1 = DecoderBlock(64, 64, 64)
-        self.head = nn.Conv2d(64, out_channels, kernel_size=1)
+        self.up1 = DecoderBlock(64, 64, 32)
+        self.up0 = DecoderBlock(32, 32, 32)
+        self.head = nn.Conv2d(32, out_channels, kernel_size=1)
 
     def forward(self, x):
+        x = x.contiguous()
         input_hw = x.shape[-2:]
-        x0 = self.encoder0(x)      # 64 channels, H/4
-        x1 = self.encoder1(x0)     # 64 channels, H/4
-        x2 = self.encoder2(x1)     # 128 channels, H/8
-        x3 = self.encoder3(x2)     # 256 channels, H/16
-        x4 = self.encoder4(x3)     # 512 channels, H/32
+        x_stem = self.stem_skip(x)
+        x_c1 = self.encoder_conv1(x)
+        x0 = self.encoder0(x_c1)
+        x1 = self.encoder1(x0)
+        x2 = self.encoder2(x1)
+        x3 = self.encoder3(x2)
+        x4 = self.encoder4(x3)
 
         x = self.center(x4)
         x = self.up4(x, x3)
         x = self.up3(x, x2)
         x = self.up2(x, x1)
-        x = self.up1(x, x0)
+        x = self.up1(x, x_c1)
+        x = self.up0(x, x_stem)
         logits = self.head(x)
         return F.interpolate(logits, size=input_hw, mode="bilinear", align_corners=False).contiguous()
 
@@ -96,6 +106,7 @@ class UNetResNet(nn.Module):
 # --- Geração e Carregamento de Datasets ---
 
 def generate_ellipse(image, center, axes, angle, color=None, thickness=-1):
+    """Desenha uma elipse na imagem com cor ou rótulo especificado."""
     if color is None:
         color = (
             int(np.random.randint(0, 256)),
@@ -106,47 +117,52 @@ def generate_ellipse(image, center, axes, angle, color=None, thickness=-1):
 
 
 def gerar_dataset_elipses(num_images=100, image_size=(128, 128), num_ellipses_range=(5, 20), seed=42):
-    """
-    Gera um dataset sintético de figuras geométricas (elipses) e suas máscaras binárias.
-    """
+    """Gera dataset sintético de elipses com ruído, variação de contraste e máscaras de instâncias (Parte 0)."""
     np.random.seed(seed)
     images = []
-    masks = []
+    instance_masks = []
 
     for _ in range(num_images):
-        img = np.zeros((image_size[0], image_size[1], 3), dtype=np.uint8)
-        mask = np.zeros(image_size, dtype=np.uint8)
+        img = np.zeros((image_size[0], image_size[1], 3), dtype=np.float32)
+        inst_mask = np.zeros(image_size, dtype=np.int32)
         num_ellipses = np.random.randint(num_ellipses_range[0], num_ellipses_range[1] + 1)
 
-        for _ in range(num_ellipses):
+        for i in range(1, num_ellipses + 1):
             center = (np.random.randint(0, image_size[1]), np.random.randint(0, image_size[0]))
             axes = (np.random.randint(5, 20), np.random.randint(5, 20))
             angle = np.random.randint(0, 360)
             color = (
-                int(np.random.randint(0, 256)),
-                int(np.random.randint(0, 256)),
-                int(np.random.randint(0, 256)),
+                float(np.random.randint(50, 256)),
+                float(np.random.randint(50, 256)),
+                float(np.random.randint(50, 256)),
             )
 
-            img = generate_ellipse(img, center, axes, angle, color=color, thickness=-1)
-            mask = generate_ellipse(mask, center, axes, angle, color=255, thickness=-1)
+            cv2.ellipse(img, center, axes, angle, 0, 360, color, -1)
+            cv2.ellipse(inst_mask, center, axes, angle, 0, 360, int(i), -1)
+
+        alpha = np.random.uniform(0.6, 1.4)
+        beta = np.random.uniform(-30, 30)
+        img = img * alpha + beta
+
+        noise = np.random.normal(0, 15, img.shape)
+        img = np.clip(img + noise, 0, 255).astype(np.uint8)
 
         images.append(img)
-        masks.append(mask)
+        instance_masks.append(inst_mask)
 
-    return np.array(images), np.array(masks)
+    return np.array(images), np.array(instance_masks)
 
 
 def carregar_dataset_real(stage1_dir, target_size=(128, 128)):
-    """
-    Carrega as imagens reais do DSB2018 (stage1_train), combinando as máscaras de núcleos individuais em uma única máscara.
-    """
+    """Carrega dataset real DSB2018 gerando máscaras rotuladas por instância (1, 2, 3...)."""
     image_ids = [d for d in os.listdir(stage1_dir) if os.path.isdir(os.path.join(stage1_dir, d))]
     images = []
-    masks = []
+    instance_masks = []
     
     print(f"Carregando {len(image_ids)} amostras de '{stage1_dir}'...")
     t0 = time.time()
+    lost_labels_count = 0
+    total_labels_count = 0
     
     for img_id in image_ids:
         img_folder = os.path.join(stage1_dir, img_id)
@@ -158,26 +174,36 @@ def carregar_dataset_real(stage1_dir, target_size=(128, 128)):
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         
         mask_paths = glob.glob(os.path.join(img_folder, 'masks', '*.png'))
-        combined_mask = np.zeros(img.shape[:2], dtype=np.uint8)
-        for mp in mask_paths:
+        inst_mask = np.zeros(img.shape[:2], dtype=np.int32)
+        for idx, mp in enumerate(mask_paths, start=1):
             m = cv2.imread(mp, cv2.IMREAD_GRAYSCALE)
-            combined_mask = np.maximum(combined_mask, m)
+            inst_mask[m > 0] = idx
             
         img_resized = cv2.resize(img, target_size, interpolation=cv2.INTER_AREA)
-        mask_resized = cv2.resize(combined_mask, target_size, interpolation=cv2.INTER_NEAREST)
+        mask_resized = cv2.resize(inst_mask, target_size, interpolation=cv2.INTER_NEAREST)
         
+        orig_unique = set(range(1, len(mask_paths) + 1))
+        resized_unique = set(np.unique(mask_resized)) - {0}
+        
+        total_labels_count += len(orig_unique)
+        lost_labels_count += (len(orig_unique) - len(resized_unique))
+        
+        relabeled_mask = np.zeros_like(mask_resized, dtype=np.int32)
+        for new_id, old_id in enumerate(sorted(resized_unique), start=1):
+            relabeled_mask[mask_resized == old_id] = new_id
+            
         images.append(img_resized)
-        masks.append(mask_resized)
+        instance_masks.append(relabeled_mask)
         
     t1 = time.time()
+    if lost_labels_count > 0:
+        print(f"Aviso: {lost_labels_count}/{total_labels_count} rótulos de instâncias foram perdidos no resize.")
     print(f"Dataset real carregado em {t1 - t0:.2f} segundos!")
-    return np.array(images), np.array(masks)
+    return np.array(images), np.array(instance_masks)
 
 
 def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42):
-    """
-    Divide um conjunto de dados em X_train, y_train, X_val, y_val, X_test, y_test.
-    """
+    """Divide um conjunto de dados em treino, validação e teste."""
     num_samples = len(images)
     indices = np.arange(num_samples)
     np.random.seed(seed)
@@ -200,27 +226,15 @@ def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42):
 # --- Treinamento, Métricas e Extração de Instâncias Ingênua ---
 
 def extract_instances_naive(pred_prob, threshold=0.5):
-    """
-    Método Ingênuo de Extração de Instâncias: Limiarização + Componentes Conexos.
-    
-    Args:
-        pred_prob (np.ndarray): Mapa de probabilidade 2D (H, W) com valores entre 0.0 e 1.0.
-        threshold (float): Limiar para binarização.
-        
-    Returns:
-        labeled_mask (np.ndarray): Máscara 2D (H, W) onde 0 é fundo e cada instância tem ID inteiro único (1, 2, ..., N).
-        num_instances (int): Quantidade total de instâncias isoladas identificadas.
-    """
+    """Extrai instâncias binarizando por limiar e aplicando componentes conexos de 8-conectividade (Item 2)."""
     binary_mask = pred_prob > threshold
-    structure = np.ones((3, 3), dtype=int)  # 8-conectividade
+    structure = np.ones((3, 3), dtype=int)
     labeled_mask, num_instances = label(binary_mask, structure=structure)
     return labeled_mask, num_instances
 
 
 def train_model(model, X_train, y_train, X_val, y_val, device, num_epochs=10, batch_size=8, learning_rate=0.001):
-    """
-    Treina o modelo reportando a perda no conjunto de treino e validação a cada época.
-    """
+    """Treina o modelo reportando a perda no conjunto de treino e validação a cada época."""
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.BCEWithLogitsLoss()
@@ -237,8 +251,8 @@ def train_model(model, X_train, y_train, X_val, y_val, device, num_epochs=10, ba
             batch_images = X_train[i * batch_size:(i + 1) * batch_size]
             batch_masks = y_train[i * batch_size:(i + 1) * batch_size]
 
-            batch_images_tensor = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).to(device) / 255.0
-            batch_masks_tensor = torch.from_numpy(batch_masks).float().unsqueeze(1).to(device) / 255.0
+            batch_images_tensor = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+            batch_masks_tensor = torch.from_numpy((batch_masks > 0).astype(np.float32)).unsqueeze(1).contiguous().to(device)
 
             optimizer.zero_grad()
             outputs = model(batch_images_tensor)
@@ -259,8 +273,8 @@ def train_model(model, X_train, y_train, X_val, y_val, device, num_epochs=10, ba
                 batch_images = X_val[i * batch_size:(i + 1) * batch_size]
                 batch_masks = y_val[i * batch_size:(i + 1) * batch_size]
 
-                batch_images_tensor = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).to(device) / 255.0
-                batch_masks_tensor = torch.from_numpy(batch_masks).float().unsqueeze(1).to(device) / 255.0
+                batch_images_tensor = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+                batch_masks_tensor = torch.from_numpy((batch_masks > 0).astype(np.float32)).unsqueeze(1).contiguous().to(device)
 
                 outputs = model(batch_images_tensor)
                 loss = criterion(outputs, batch_masks_tensor)
@@ -271,20 +285,20 @@ def train_model(model, X_train, y_train, X_val, y_val, device, num_epochs=10, ba
 
 
 def calculate_dice_coefficient(y_true, y_pred):
+    """Calcula o Coeficiente Dice entre duas máscaras binárias."""
     intersection = np.sum(y_true * y_pred)
     return (2. * intersection) / (np.sum(y_true) + np.sum(y_pred) + 1e-6)
 
 
 def calculate_iou(y_true, y_pred):
+    """Calcula a Interseção sobre União (IoU) entre duas máscaras binárias."""
     intersection = np.sum(y_true * y_pred)
     union = np.sum(y_true) + np.sum(y_pred) - intersection
     return intersection / (union + 1e-6)
 
 
 def evaluate_model(model, X, y, device, threshold=0.5, batch_size=8):
-    """
-    Avalia o modelo em um conjunto de dados calculando Mean Dice Coefficient e Mean IoU.
-    """
+    """Avalia o modelo em um conjunto de dados calculando Mean Dice Coefficient e Mean IoU semânticos."""
     model.eval()
     dice_list = []
     iou_list = []
@@ -296,12 +310,12 @@ def evaluate_model(model, X, y, device, threshold=0.5, batch_size=8):
             batch_img = X[b * batch_size:(b + 1) * batch_size]
             batch_mask = y[b * batch_size:(b + 1) * batch_size]
 
-            img_tensor = torch.from_numpy(batch_img).float().permute(0, 3, 1, 2).to(device) / 255.0
+            img_tensor = torch.from_numpy(batch_img).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
             outputs = model(img_tensor)
             preds = (torch.sigmoid(outputs) > threshold).cpu().numpy().squeeze(1)
 
             for i in range(len(batch_img)):
-                y_t = (batch_mask[i] > 127).astype(np.float32)
+                y_t = (batch_mask[i] > 0).astype(np.float32)
                 y_p = preds[i].astype(np.float32)
                 dice_list.append(calculate_dice_coefficient(y_t, y_p))
                 iou_list.append(calculate_iou(y_t, y_p))
@@ -314,9 +328,7 @@ def evaluate_model(model, X, y, device, threshold=0.5, batch_size=8):
 # --- Visualização ---
 
 def plot_dataset_samples(X_train, y_train, X_val, y_val, X_test, y_test):
-    """
-    Exibe amostras dos conjuntos de Treino, Validação e Teste.
-    """
+    """Exibe amostras dos conjuntos de Treino, Validação e Teste."""
     plt.figure(figsize=(12, 6))
 
     samples = [
@@ -334,18 +346,16 @@ def plot_dataset_samples(X_train, y_train, X_val, y_val, X_test, y_test):
         plt.axis('off')
 
         plt.subplot(2, 5, i + 6)
-        plt.imshow(mask, cmap='gray')
+        plt.imshow(mask > 0, cmap='gray')
         plt.title(f'Máscara ({title})')
         plt.axis('off')
 
     plt.tight_layout()
     plt.show()
-    
+
 
 def plot_predictions(model, X_test, y_test, device, num_samples=5, threshold=0.5):
-    """
-    Visualiza as predições do modelo nas amostras do conjunto de teste comparando com o Ground Truth.
-    """
+    """Visualiza as predições do modelo nas amostras do conjunto de teste comparando com o Ground Truth."""
     model.eval()
 
     with torch.no_grad():
@@ -353,13 +363,13 @@ def plot_predictions(model, X_test, y_test, device, num_samples=5, threshold=0.5
             img = X_test[i]
             mask = y_test[i]
 
-            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).contiguous().to(device) / 255.0
 
             output = model(img_tensor)
             output_mask = torch.sigmoid(output).squeeze().cpu().numpy()
             output_mask_binary = (output_mask > threshold).astype(np.uint8) * 255
 
-            y_t = (mask > 127).astype(np.float32)
+            y_t = (mask > 0).astype(np.float32)
             y_p = (output_mask > threshold).astype(np.float32)
             dice_val = calculate_dice_coefficient(y_t, y_p)
             iou_val = calculate_iou(y_t, y_p)
@@ -371,7 +381,7 @@ def plot_predictions(model, X_test, y_test, device, num_samples=5, threshold=0.5
             plt.axis('off')
 
             plt.subplot(1, 3, 2)
-            plt.imshow(mask, cmap='gray')
+            plt.imshow(mask > 0, cmap='gray')
             plt.title('Máscara Real (Ground Truth)')
             plt.axis('off')
 
@@ -385,26 +395,20 @@ def plot_predictions(model, X_test, y_test, device, num_samples=5, threshold=0.5
 
 
 def plot_naive_instance_extraction(model, X_test, y_test, device, num_samples=3, threshold=0.5):
-    """
-    Exibe a extração de instâncias usando o Método Ingênuo (Limiar + Componentes Conexos).
-    """
+    """Exibe a extração de instâncias usando o Método Ingênuo vs Ground Truth Real."""
     model.eval()
 
     with torch.no_grad():
         for i in range(min(num_samples, len(X_test))):
             img = X_test[i]
-            mask = y_test[i]
+            gt_labeled = y_test[i]
 
-            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).contiguous().to(device) / 255.0
             output = model(img_tensor)
             pred_prob = torch.sigmoid(output).squeeze().cpu().numpy()
 
-            # Método ingênuo: limiar + componentes conexos
             labeled_mask, num_instances = extract_instances_naive(pred_prob, threshold=threshold)
-
-            # Instâncias reais ground truth no mask
-            gt_binary = mask > 127
-            gt_labeled, num_gt_instances = label(gt_binary, structure=np.ones((3, 3), dtype=int))
+            num_gt_instances = len(np.unique(gt_labeled[gt_labeled > 0]))
 
             plt.figure(figsize=(12, 3.5))
             plt.subplot(1, 3, 1)
@@ -429,15 +433,14 @@ def plot_naive_instance_extraction(model, X_test, y_test, device, num_samples=3,
 # --- Avaliação por Instâncias, Casamento (Matching) e Quantificação do Fracasso ---
 
 def calculate_instance_iou_matrix(gt_labeled, num_gt, pred_labeled, num_pred):
-    """
-    Calcula a matriz de IoU entre todas as instâncias do GT (1..num_gt) e da Predição (1..num_pred).
-    """
+    """Calcula a matriz de IoU entre todas as instâncias do GT e da Predição."""
     iou_matrix = np.zeros((num_gt, num_pred), dtype=np.float32)
     if num_gt == 0 or num_pred == 0:
         return iou_matrix
 
-    for i in range(1, num_gt + 1):
-        gt_mask = (gt_labeled == i)
+    unique_gt = np.unique(gt_labeled[gt_labeled > 0])
+    for i_idx, gt_id in enumerate(unique_gt):
+        gt_mask = (gt_labeled == gt_id)
         area_gt = gt_mask.sum()
         if area_gt == 0:
             continue
@@ -447,15 +450,13 @@ def calculate_instance_iou_matrix(gt_labeled, num_gt, pred_labeled, num_pred):
             if inter == 0:
                 continue
             union = area_gt + pred_mask.sum() - inter
-            iou_matrix[i - 1, j - 1] = inter / union if union > 0 else 0.0
+            iou_matrix[i_idx, j - 1] = inter / union if union > 0 else 0.0
 
     return iou_matrix
 
 
 def match_instances_greedy(iou_matrix, iou_thresh):
-    """
-    Casamento Guloso por IoU Decrescente.
-    """
+    """Casamento Guloso por IoU Decrescente."""
     num_gt, num_pred = iou_matrix.shape
     matched_gt = set()
     matched_pred = set()
@@ -479,9 +480,7 @@ def match_instances_greedy(iou_matrix, iou_thresh):
 
 
 def match_instances_hungarian(iou_matrix, iou_thresh):
-    """
-    Casamento Global Otimizado via Algoritmo Húngaro (Munkres).
-    """
+    """Casamento Global Otimizado via Algoritmo Húngaro (Munkres)."""
     num_gt, num_pred = iou_matrix.shape
     if num_gt == 0 or num_pred == 0:
         return 0
@@ -498,14 +497,12 @@ def match_instances_hungarian(iou_matrix, iou_thresh):
 
 
 def evaluate_instance_metrics_single(pred_prob, mask_gt, threshold=0.5, iou_thresholds=np.arange(0.50, 1.00, 0.05), matching_method="greedy"):
-    """
-    Avalia uma única imagem em nível de instâncias calculando mAP@[.50:.95] e erro de contagem.
-    """
+    """Avalia uma única imagem em nível de instâncias calculando mAP@[.50:.95] e erro de contagem."""
     pred_labeled, num_pred = extract_instances_naive(pred_prob, threshold=threshold)
 
-    gt_binary = mask_gt > 127
-    structure = np.ones((3, 3), dtype=int)
-    gt_labeled, num_gt = label(gt_binary, structure=structure)
+    gt_labeled = mask_gt.astype(np.int32)
+    unique_gt = np.unique(gt_labeled[gt_labeled > 0])
+    num_gt = len(unique_gt)
 
     count_error = abs(num_pred - num_gt)
 
@@ -539,9 +536,7 @@ def evaluate_instance_metrics_single(pred_prob, mask_gt, threshold=0.5, iou_thre
 
 
 def evaluate_model_instances(model, X, y, device, threshold=0.5, iou_thresholds=np.arange(0.50, 1.00, 0.05), matching_method="greedy"):
-    """
-    Avalia o modelo em todo o conjunto de teste em nível de instâncias.
-    """
+    """Avalia o modelo em todo o conjunto de teste em nível de instâncias."""
     model.eval()
     mAP_list = []
     count_error_list = []
@@ -555,7 +550,7 @@ def evaluate_model_instances(model, X, y, device, threshold=0.5, iou_thresholds=
             img = X[i]
             mask = y[i]
 
-            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).contiguous().to(device) / 255.0
             output = model(img_tensor)
             pred_prob = torch.sigmoid(output).squeeze().cpu().numpy()
 
@@ -589,10 +584,7 @@ def evaluate_model_instances(model, X, y, device, threshold=0.5, iou_thresholds=
 
 
 def evaluate_instance_level(model, X, y, device, threshold=0.5, matching_method="hungarian", dataset_name="Reais"):
-    """
-    Item 3: Avalia o modelo em nível de instâncias calculando o AP para cada limiar de IoU (0.50 a 0.95, passo 0.05),
-    o mAP@[.50:.95] final e o erro absoluto de contagem por imagem.
-    """
+    """Item 3: Avalia o AP para cada limiar de IoU (0.50 a 0.95), o mAP@[.50:.95] e o erro de contagem."""
     iou_thresholds = np.arange(0.50, 1.00, 0.05)
     results = evaluate_model_instances(
         model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method=matching_method
@@ -611,9 +603,7 @@ def evaluate_instance_level(model, X, y, device, threshold=0.5, matching_method=
 
 
 def compare_matching_methods(model, X, y, device, threshold=0.5, dataset_name="Reais"):
-    """
-    Item 4: Documenta e compara a regra de Matching Guloso (Greedy por IoU decrescente) vs. Algoritmo Húngaro (Hungarian).
-    """
+    """Item 4: Documenta e compara a regra de Matching Guloso vs. Algoritmo Húngaro (Munkres)."""
     iou_thresholds = np.arange(0.50, 1.00, 0.05)
     res_greedy = evaluate_model_instances(model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method="greedy")
     res_hungarian = evaluate_model_instances(model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method="hungarian")
@@ -627,9 +617,7 @@ def compare_matching_methods(model, X, y, device, threshold=0.5, dataset_name="R
 
 
 def plot_quantify_failure(results, dataset_name="Reais"):
-    """
-    Quantifica o fracasso do método ingênuo plotando o mAP e o Erro de Contagem vs. a Densidade de Objetos (num_gt).
-    """
+    """Item 5: Plota gráficos de mAP e Erro de Contagem vs. Densidade de Objetos para quantificar o fracasso."""
     num_gt = results["num_gt_list"]
     mAPs = results["mAP_list"]
     count_errors = results["count_error_list"]
@@ -673,4 +661,3 @@ def plot_quantify_failure(results, dataset_name="Reais"):
 
     plt.tight_layout()
     plt.show()
-
