@@ -5,14 +5,22 @@ import numpy as np
 import cv2
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 import scipy.ndimage as ndi
 from scipy.ndimage import label
 from scipy.optimize import linear_sum_assignment
-from skimage.segmentation import watershed
+
+try:
+    from skimage.segmentation import watershed
+except ImportError:
+    watershed = None
+
 from torchvision import models
 from torchvision.models import ResNet18_Weights
+
+
+
 
 
 def get_device():
@@ -707,20 +715,11 @@ def plot_quantify_failure(results, dataset_name="Reais"):
 # =============================================================================
 
 def gerar_alvos_trilha_a(instance_masks, border_thickness=1):
-    """
-    Gera alvos de 3 classes para a Trilha A (Fronteiras e Watershed):
-      - Classe 0: Fundo (Background)
-      - Classe 1: Interior do núcleo (Marcadores / Seeds para Watershed)
-      - Classe 2: Fronteira / Borda entre instâncias
-
-    Cada instância é erodida individualmente para gerar o interior garantindo que
-    núcleos vizinhos não se toquem. Para núcleos minúsculos, o centróide é preservado.
-    A borda de cada núcleo (e a faixa de contato entre eles) torna-se classe 2.
-    """
+    """Gera alvos de 3 classes (0: fundo, 1: interior, 2: fronteira) preservando sementes de núcleos pequenos."""
     num_samples = len(instance_masks)
     h, w = instance_masks.shape[1:3]
     targets_3c = np.zeros((num_samples, h, w), dtype=np.int64)
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    kernel_cross = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
 
     for idx in range(num_samples):
         mask = instance_masks[idx]
@@ -729,17 +728,18 @@ def gerar_alvos_trilha_a(instance_masks, border_thickness=1):
 
         for uid in unique_ids:
             obj = (mask == uid).astype(np.uint8)
-            eroded = cv2.erode(obj, kernel, iterations=border_thickness)
-
-            # Se a erosão apagou um núcleo muito pequeno, preserva seu centróide
-            if eroded.sum() == 0:
+            if obj.sum() <= 12:
                 coords = np.argwhere(obj > 0)
-                cy, cx = np.round(coords.mean(axis=0)).astype(int)
-                if obj[cy, cx] == 0:
+                cy, cx = coords[len(coords) // 2]
+                interior_mask[cy, cx] = True
+            else:
+                eroded = cv2.erode(obj, kernel_cross, iterations=border_thickness)
+                if eroded.sum() == 0:
+                    coords = np.argwhere(obj > 0)
                     cy, cx = coords[len(coords) // 2]
-                eroded[cy, cx] = 1
-
-            interior_mask |= (eroded > 0)
+                    interior_mask[cy, cx] = True
+                else:
+                    interior_mask |= (eroded > 0)
 
         fg_mask = (mask > 0)
         border_mask = fg_mask & (~interior_mask)
@@ -752,25 +752,17 @@ def gerar_alvos_trilha_a(instance_masks, border_thickness=1):
     return targets_3c
 
 
-def calcular_pesos_classes_trilha_a(y_train_3c, power=0.5, epsilon=1e-3, max_weight=5.0):
-    """
-    Calcula pesos balanceados para as classes (0: Fundo, 1: Interior, 2: Fronteira).
-    Usa inverso da frequência suavizado (por padrão com power=0.5, i.e., raiz quadrada),
-    evitando que a classe fronteira receba um peso desproporcional que deforme o interior.
-    """
+def calcular_pesos_classes_trilha_a(y_train_3c, power=0.5, epsilon=1e-4):
+    """Calcula pesos inversamente proporcionais à frequência das classes normalizados pela média."""
     counts = np.bincount(y_train_3c.flatten(), minlength=3).astype(np.float32)
-    total = counts.sum()
-    freqs = counts / (total + epsilon)
+    freqs = counts / (counts.sum() + epsilon)
     weights = 1.0 / (freqs ** power + epsilon)
     weights = weights / weights.mean()
-    if max_weight is not None:
-        weights = np.clip(weights, a_min=None, a_max=max_weight)
-        weights = weights / weights.mean()
     return torch.from_numpy(weights).float()
 
 
 def plot_trilha_a_samples(X, y_3c, num_samples=3):
-    """Exibe amostras das imagens originais e dos alvos de 3 classes (Fundo=0, Interior=1, Fronteira=2)."""
+    """Exibe amostras das imagens originais e dos alvos de 3 classes gerados."""
     plt.figure(figsize=(4 * num_samples, 4))
     for i in range(min(num_samples, len(X))):
         plt.subplot(2, num_samples, i + 1)
@@ -788,12 +780,8 @@ def plot_trilha_a_samples(X, y_3c, num_samples=3):
 
 
 class FocalLossMultiClass(nn.Module):
-    """
-    Focal Loss multi-classe para balanceamento de classes minoritárias (slides 73-79).
-    FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
-    Com gamma=0.0, reduz-se exatamente à Cross-Entropy Ponderada.
-    """
-    def __init__(self, weight=None, gamma=2.0, reduction='mean'):
+    """Implementa a Focal Loss multi-classe balanceada conforme os slides 74 a 79 da aula."""
+    def __init__(self, weight=None, gamma=0.0, reduction='mean'):
         super().__init__()
         self.weight = weight
         self.gamma = gamma
@@ -813,23 +801,15 @@ class FocalLossMultiClass(nn.Module):
             loss = loss * w
 
         if self.reduction == 'mean':
-            return loss.sum() / targets_one_hot.sum().clamp(min=1.0)
+            return loss.sum() / (targets.numel() + 1e-8)
         elif self.reduction == 'sum':
             return loss.sum()
         else:
             return loss
 
 
-def decodificar_watershed_trilha_a(pred_probs, threshold_interior=0.4, threshold_fg=0.4, min_marker_size=1):
-    """
-    Decodifica as probabilidades de 3 classes (Fundo, Interior, Fronteira) em instâncias via Watershed.
-    
-    Parâmetros:
-      - pred_probs: array numpy (3, H, W) ou (H, W, 3) contendo probabilidades softmax.
-      - threshold_interior: limiar de confiança para a classe interior ser considerada marcador.
-      - threshold_fg: limiar para considerar pixel como foreground.
-      - min_marker_size: tamanho mínimo em pixels para um marcador ser mantido (elimina ruídos).
-    """
+def decodificar_watershed_trilha_a(pred_probs, threshold_interior=0.35, threshold_fg=0.35, min_marker_size=1):
+    """Decodifica as probabilidades de 3 classes em instâncias separadas usando o algoritmo Watershed."""
     if pred_probs.shape[0] == 3 and pred_probs.ndim == 3:
         p_bg = pred_probs[0]
         p_interior = pred_probs[1]
@@ -841,35 +821,35 @@ def decodificar_watershed_trilha_a(pred_probs, threshold_interior=0.4, threshold
     else:
         raise ValueError("pred_probs deve conter 3 canais de probabilidades.")
 
-    # 1. Marcadores a partir da probabilidade de interior
+    # 1. Marcadores a partir da probabilidade de interior sem atenuação de blur
     interior_binary = (p_interior > threshold_interior)
-    structure = np.ones((3, 3), dtype=int)
-    markers, num_markers = label(interior_binary, structure=structure)
+    markers, num_markers = label(interior_binary)
 
-    # Remove marcadores espúrios muito pequenos se min_marker_size > 0
-    if min_marker_size > 0 and num_markers > 0:
+    if min_marker_size > 1 and num_markers > 0:
         sizes = ndi.sum(np.ones_like(markers), markers, range(1, num_markers + 1))
         small_mask = np.isin(markers, np.where(sizes < min_marker_size)[0] + 1)
         markers[small_mask] = 0
-        markers, num_markers = label(markers > 0, structure=structure)
+        markers, num_markers = label(markers > 0)
 
     if num_markers == 0:
         return np.zeros(p_bg.shape, dtype=np.int32), 0
 
-    # 2. Máscara de primeiro plano (Foreground)
-    fg_mask = ((p_interior + p_border) > threshold_fg) | (markers > 0)
+    # 2. Máscara de primeiro plano para limitar a expansão do Watershed
+    fg_mask = (p_interior + p_border > threshold_fg) | (markers > 0)
 
-    # 3. Superfície topográfica baseada na Transformada de Distância Euclidiana
-    # A transformada de distância sobre fg_mask gera vales suaves nos centros e elevação contínua até as bordas,
-    # eliminando platôs planos e preservando a fidelidade geométrica dos contornos (alto IoU @ 0.75).
-    # O termo + p_border atua como crista extra para reforçar a linha divisória entre células em contato.
-    dist_map = ndi.distance_transform_edt(fg_mask)
-    surface = -dist_map + (p_border * 1.5)
+    # 3. Superfície topográfica física com vales nos centros e cristas nas fronteiras
+    surface = -p_interior + p_border
 
-    # 4. Inundação via Watershed do skimage
-    labeled_instances = watershed(surface, markers=markers, mask=fg_mask)
+    # 4. Inundação por Watershed com skimage ou fallback do OpenCV restrito à máscara
+    if watershed is not None:
+        labeled_instances = watershed(surface, markers=markers, mask=fg_mask)
+    else:
+        norm_surf = cv2.normalize(surface, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        img_3ch = cv2.cvtColor(norm_surf, cv2.COLOR_GRAY2BGR)
+        cv2_markers = markers.copy().astype(np.int32)
+        cv2.watershed(img_3ch, cv2_markers)
+        labeled_instances = np.where((cv2_markers > 0) & fg_mask, cv2_markers, 0)
 
-    # Renumera sequencialmente de 1 a N
     unique_ids = np.unique(labeled_instances[labeled_instances > 0])
     final_mask = np.zeros_like(labeled_instances, dtype=np.int32)
     for new_id, old_id in enumerate(unique_ids, start=1):
@@ -879,9 +859,9 @@ def decodificar_watershed_trilha_a(pred_probs, threshold_interior=0.4, threshold
 
 
 def train_model_trilha_a(model, X_train, y_train_3c, X_val, y_val_3c, device,
-                         class_weights=None, gamma=0.0, num_epochs=10,
-                         batch_size=8, learning_rate=0.001):
-    """Treina o modelo U-Net com saída de 3 classes para a Trilha A usando Cross-Entropy Balanceada / Focal Loss."""
+                         class_weights=None, gamma=0.0, num_epochs=15,
+                         batch_size=16, learning_rate=0.0005):
+    """Treina o modelo U-Net com 3 classes para a Trilha A usando perda balanceada e otimizador Adam."""
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     criterion = FocalLossMultiClass(weight=class_weights, gamma=gamma)
@@ -932,7 +912,7 @@ def train_model_trilha_a(model, X_train, y_train_3c, X_val, y_val_3c, device,
 
 
 def evaluate_instance_metrics_single_trilha_a(pred_probs, mask_gt_instances,
-                                             threshold_interior=0.4, threshold_fg=0.4,
+                                             threshold_interior=0.35, threshold_fg=0.35,
                                              min_marker_size=1,
                                              iou_thresholds=np.arange(0.50, 1.00, 0.05),
                                              matching_method="hungarian"):
@@ -977,7 +957,7 @@ def evaluate_instance_metrics_single_trilha_a(pred_probs, mask_gt_instances,
 
 
 def evaluate_model_instances_trilha_a(model, X, y_gt_instances, device,
-                                     threshold_interior=0.4, threshold_fg=0.4,
+                                     threshold_interior=0.35, threshold_fg=0.35,
                                      min_marker_size=1,
                                      iou_thresholds=np.arange(0.50, 1.00, 0.05),
                                      matching_method="hungarian"):
@@ -1029,8 +1009,8 @@ def evaluate_model_instances_trilha_a(model, X, y_gt_instances, device,
     return results
 
 
-def evaluate_instance_level_trilha_a(model, X, y, device, threshold_interior=0.5, threshold_fg=0.5,
-                                    min_marker_size=3, matching_method="hungarian", dataset_name="Reais (DSB2018)"):
+def evaluate_instance_level_trilha_a(model, X, y, device, threshold_interior=0.35, threshold_fg=0.35,
+                                    min_marker_size=1, matching_method="hungarian", dataset_name="Reais (DSB2018)"):
     """Parte 2: Avalia o AP para cada limiar de IoU (0.50 a 0.95), o mAP@[.50:.95] e o erro de contagem via Watershed."""
     iou_thresholds = np.arange(0.50, 1.00, 0.05)
     results = evaluate_model_instances_trilha_a(
@@ -1051,7 +1031,7 @@ def evaluate_instance_level_trilha_a(model, X, y, device, threshold_interior=0.5
 
 
 def plot_trilha_a_predictions(model, X_test, y_test_gt, device, num_samples=3,
-                             threshold_interior=0.5, threshold_fg=0.5, min_marker_size=3):
+                             threshold_interior=0.35, threshold_fg=0.35, min_marker_size=1):
     """Visualiza as predições da Trilha A: Imagem, GT, Probabilidade Interior, Probabilidade Fronteira e Watershed."""
     model.eval()
 
