@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from scipy.ndimage import label
+from scipy.optimize import linear_sum_assignment
 from torchvision import models
 from torchvision.models import ResNet18_Weights
 
@@ -423,3 +424,253 @@ def plot_naive_instance_extraction(model, X_test, y_test, device, num_samples=3,
 
             plt.tight_layout()
             plt.show()
+
+
+# --- Avaliação por Instâncias, Casamento (Matching) e Quantificação do Fracasso ---
+
+def calculate_instance_iou_matrix(gt_labeled, num_gt, pred_labeled, num_pred):
+    """
+    Calcula a matriz de IoU entre todas as instâncias do GT (1..num_gt) e da Predição (1..num_pred).
+    """
+    iou_matrix = np.zeros((num_gt, num_pred), dtype=np.float32)
+    if num_gt == 0 or num_pred == 0:
+        return iou_matrix
+
+    for i in range(1, num_gt + 1):
+        gt_mask = (gt_labeled == i)
+        area_gt = gt_mask.sum()
+        if area_gt == 0:
+            continue
+        for j in range(1, num_pred + 1):
+            pred_mask = (pred_labeled == j)
+            inter = np.logical_and(gt_mask, pred_mask).sum()
+            if inter == 0:
+                continue
+            union = area_gt + pred_mask.sum() - inter
+            iou_matrix[i - 1, j - 1] = inter / union if union > 0 else 0.0
+
+    return iou_matrix
+
+
+def match_instances_greedy(iou_matrix, iou_thresh):
+    """
+    Casamento Guloso por IoU Decrescente.
+    """
+    num_gt, num_pred = iou_matrix.shape
+    matched_gt = set()
+    matched_pred = set()
+
+    pairs = []
+    for i in range(num_gt):
+        for j in range(num_pred):
+            if iou_matrix[i, j] >= iou_thresh:
+                pairs.append((iou_matrix[i, j], i, j))
+
+    pairs.sort(key=lambda x: x[0], reverse=True)
+
+    tp = 0
+    for iou_val, i, j in pairs:
+        if i not in matched_gt and j not in matched_pred:
+            matched_gt.add(i)
+            matched_pred.add(j)
+            tp += 1
+
+    return tp
+
+
+def match_instances_hungarian(iou_matrix, iou_thresh):
+    """
+    Casamento Global Otimizado via Algoritmo Húngaro (Munkres).
+    """
+    num_gt, num_pred = iou_matrix.shape
+    if num_gt == 0 or num_pred == 0:
+        return 0
+
+    cost_matrix = 1.0 - iou_matrix
+    gt_ind, pred_ind = linear_sum_assignment(cost_matrix)
+
+    tp = 0
+    for i, j in zip(gt_ind, pred_ind):
+        if iou_matrix[i, j] >= iou_thresh:
+            tp += 1
+
+    return tp
+
+
+def evaluate_instance_metrics_single(pred_prob, mask_gt, threshold=0.5, iou_thresholds=np.arange(0.50, 1.00, 0.05), matching_method="greedy"):
+    """
+    Avalia uma única imagem em nível de instâncias calculando mAP@[.50:.95] e erro de contagem.
+    """
+    pred_labeled, num_pred = extract_instances_naive(pred_prob, threshold=threshold)
+
+    gt_binary = mask_gt > 127
+    structure = np.ones((3, 3), dtype=int)
+    gt_labeled, num_gt = label(gt_binary, structure=structure)
+
+    count_error = abs(num_pred - num_gt)
+
+    if num_gt == 0 and num_pred == 0:
+        aps = np.ones(len(iou_thresholds), dtype=np.float32)
+        return 1.0, count_error, num_gt, num_pred, aps
+    elif num_gt == 0 or num_pred == 0:
+        aps = np.zeros(len(iou_thresholds), dtype=np.float32)
+        return 0.0, count_error, num_gt, num_pred, aps
+
+    iou_matrix = calculate_instance_iou_matrix(gt_labeled, num_gt, pred_labeled, num_pred)
+
+    aps = []
+    for t in iou_thresholds:
+        if matching_method == "greedy":
+            tp = match_instances_greedy(iou_matrix, t)
+        elif matching_method == "hungarian":
+            tp = match_instances_hungarian(iou_matrix, t)
+        else:
+            raise ValueError(f"Método de matching desconhecido: {matching_method}")
+
+        fp = num_pred - tp
+        fn = num_gt - tp
+        denom = tp + fp + fn
+        ap_t = tp / denom if denom > 0 else 0.0
+        aps.append(ap_t)
+
+    aps = np.array(aps, dtype=np.float32)
+    mAP = float(np.mean(aps))
+    return mAP, count_error, num_gt, num_pred, aps
+
+
+def evaluate_model_instances(model, X, y, device, threshold=0.5, iou_thresholds=np.arange(0.50, 1.00, 0.05), matching_method="greedy"):
+    """
+    Avalia o modelo em todo o conjunto de teste em nível de instâncias.
+    """
+    model.eval()
+    mAP_list = []
+    count_error_list = []
+    num_gt_list = []
+    num_pred_list = []
+    aps_matrix = []
+
+    t0 = time.time()
+    with torch.no_grad():
+        for i in range(len(X)):
+            img = X[i]
+            mask = y[i]
+
+            img_tensor = torch.from_numpy(img).float().permute(2, 0, 1).unsqueeze(0).to(device) / 255.0
+            output = model(img_tensor)
+            pred_prob = torch.sigmoid(output).squeeze().cpu().numpy()
+
+            mAP, count_err, num_gt, num_pred, aps = evaluate_instance_metrics_single(
+                pred_prob, mask, threshold=threshold, iou_thresholds=iou_thresholds, matching_method=matching_method
+            )
+
+            mAP_list.append(mAP)
+            count_error_list.append(count_err)
+            num_gt_list.append(num_gt)
+            num_pred_list.append(num_pred)
+            aps_matrix.append(aps)
+
+    elapsed_time = time.time() - t0
+    mean_aps_per_threshold = np.mean(aps_matrix, axis=0)
+
+    results = {
+        "mean_mAP": float(np.mean(mAP_list)),
+        "mean_count_error": float(np.mean(count_error_list)),
+        "elapsed_time": elapsed_time,
+        "mAP_list": np.array(mAP_list),
+        "count_error_list": np.array(count_error_list),
+        "num_gt_list": np.array(num_gt_list),
+        "num_pred_list": np.array(num_pred_list),
+        "iou_thresholds": iou_thresholds,
+        "mean_aps_per_threshold": mean_aps_per_threshold,
+        "matching_method": matching_method,
+    }
+
+    return results
+
+
+def evaluate_instance_level(model, X, y, device, threshold=0.5, matching_method="hungarian", dataset_name="Reais"):
+    """
+    Item 3: Avalia o modelo em nível de instâncias calculando o AP para cada limiar de IoU (0.50 a 0.95, passo 0.05),
+    o mAP@[.50:.95] final e o erro absoluto de contagem por imagem.
+    """
+    iou_thresholds = np.arange(0.50, 1.00, 0.05)
+    results = evaluate_model_instances(
+        model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method=matching_method
+    )
+
+    print(f"\n--- [Item 3] Avaliação por Instâncias ({dataset_name}) ---")
+    print("Precisão Média (AP) para cada Limiar de IoU (0.50 a 0.95, passo 0.05):")
+    for idx, t in enumerate(iou_thresholds):
+        ap_t = results['mean_aps_per_threshold'][idx]
+        print(f"  IoU = {t:.2f} : AP = {ap_t:.4f}")
+
+    print(f"\n--> mAP@[.50:.95] Final: {results['mean_mAP']:.4f}")
+    print(f"--> Erro Absoluto Médio de Contagem por Imagem: {results['mean_count_error']:.2f} objetos")
+
+    return results
+
+
+def compare_matching_methods(model, X, y, device, threshold=0.5, dataset_name="Reais"):
+    """
+    Item 4: Documenta e compara a regra de Matching Guloso (Greedy por IoU decrescente) vs. Algoritmo Húngaro (Hungarian).
+    """
+    iou_thresholds = np.arange(0.50, 1.00, 0.05)
+    res_greedy = evaluate_model_instances(model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method="greedy")
+    res_hungarian = evaluate_model_instances(model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method="hungarian")
+
+    print(f"\n--- [Item 4] Comparação da Regra de Matching ({dataset_name}) ---")
+    print(f"Guloso (Greedy):    mAP@[.50:.95] = {res_greedy['mean_mAP']:.4f} | Erro Médio Contagem = {res_greedy['mean_count_error']:.2f}")
+    print(f"Húngaro (Hungarian): mAP@[.50:.95] = {res_hungarian['mean_mAP']:.4f} | Erro Médio Contagem = {res_hungarian['mean_count_error']:.2f}")
+    print("Regra de matching documentada e explicitada: Algoritmo Húngaro (Hungarian)")
+
+    return res_greedy, res_hungarian
+
+
+def plot_quantify_failure(results, dataset_name="Reais"):
+    """
+    Quantifica o fracasso do método ingênuo plotando o mAP e o Erro de Contagem vs. a Densidade de Objetos (num_gt).
+    """
+    num_gt = results["num_gt_list"]
+    mAPs = results["mAP_list"]
+    count_errors = results["count_error_list"]
+    method = results["matching_method"].capitalize()
+
+    plt.figure(figsize=(14, 5))
+
+    # Gráfico 1: mAP vs. Densidade de Objetos
+    plt.subplot(1, 2, 1)
+    plt.scatter(num_gt, mAPs, alpha=0.6, color='crimson', edgecolors='k', label='Amostras')
+    
+    if len(num_gt) > 1 and len(np.unique(num_gt)) > 1:
+        idx_sort = np.argsort(num_gt)
+        degree = 2 if len(np.unique(num_gt)) > 2 else 1
+        z = np.polyfit(num_gt, mAPs, degree)
+        p = np.poly1d(z)
+        x_trend = np.linspace(num_gt.min(), num_gt.max(), 100)
+        plt.plot(x_trend, p(x_trend), "b--", linewidth=2, label="Tendência")
+
+    plt.title(f'Quantificação do Fracasso: mAP vs Densidade ({dataset_name} - {method})')
+    plt.xlabel('Densidade de Objetos na Imagem (Num GT)')
+    plt.ylabel('mAP@[.50:.95]')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+
+    # Gráfico 2: Erro Absoluto de Contagem vs. Densidade de Objetos
+    plt.subplot(1, 2, 2)
+    plt.scatter(num_gt, count_errors, alpha=0.6, color='darkorange', edgecolors='k', label='Amostras')
+
+    if len(num_gt) > 1 and len(np.unique(num_gt)) > 1:
+        z_err = np.polyfit(num_gt, count_errors, 1)
+        p_err = np.poly1d(z_err)
+        x_trend = np.linspace(num_gt.min(), num_gt.max(), 100)
+        plt.plot(x_trend, p_err(x_trend), "r--", linewidth=2, label="Tendência")
+
+    plt.title(f'Erro de Contagem vs Densidade ({dataset_name} - {method})')
+    plt.xlabel('Densidade de Objetos na Imagem (Num GT)')
+    plt.ylabel('Erro Absoluto de Contagem (|Pred - GT|)')
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
