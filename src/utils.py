@@ -250,25 +250,85 @@ def carregar_dataset_real(stage1_dir, target_size=(128, 128)):
     return np.array(images), np.array(instance_masks)
 
 
-def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42):
-    """Divide um conjunto de dados em treino, validação e teste."""
+def identificar_modalidades(images):
+    """
+    Classifica cada imagem em sua modalidade de microscopia no DSB2018:
+    - 'fluorescence': Fundo escuro (< 100) com núcleos fluorescentes brilhantes.
+    - 'brightfield_color': Campo claro com coloração histológica (H&E, tons púrpuras/rosas).
+    - 'brightfield_gray': Campo claro monocromático em transmissão.
+    """
+    modalidades = []
+    for img in images:
+        corners = np.concatenate([img[:8, :8], img[-8:, :8], img[:8, -8:], img[-8:, -8:]])
+        bg = float(np.mean(corners))
+        color_std = float(np.std(img, axis=-1).mean())
+        if bg < 100:
+            modalidades.append("fluorescence")
+        elif color_std > 5.0:
+            modalidades.append("brightfield_color")
+        else:
+            modalidades.append("brightfield_gray")
+    return np.array(modalidades)
+
+
+def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42, stratify=True):
+    """
+    Divide um conjunto de dados em treino, validação e teste com estratificação por modalidade
+    conforme exigido no enunciado do PA1 (Seção 2: Dados).
+    """
     num_samples = len(images)
-    indices = np.arange(num_samples)
     np.random.seed(seed)
-    np.random.shuffle(indices)
 
-    train_end = int(train_ratio * num_samples)
-    val_end = int((train_ratio + val_ratio) * num_samples)
+    if stratify and images.ndim == 4:
+        mods = identificar_modalidades(images)
+        unique_mods = np.unique(mods)
 
-    train_idx = indices[:train_end]
-    val_idx = indices[train_end:val_end]
-    test_idx = indices[val_end:]
+        train_idx_all = []
+        val_idx_all = []
+        test_idx_all = []
+
+        for m in unique_mods:
+            m_indices = np.where(mods == m)[0]
+            np.random.shuffle(m_indices)
+            n_m = len(m_indices)
+
+            t_end = int(train_ratio * n_m)
+            v_end = int((train_ratio + val_ratio) * n_m)
+
+            train_idx_all.extend(m_indices[:t_end])
+            val_idx_all.extend(m_indices[t_end:v_end])
+            test_idx_all.extend(m_indices[v_end:])
+
+        train_idx = np.array(train_idx_all)
+        val_idx = np.array(val_idx_all)
+        test_idx = np.array(test_idx_all)
+
+        np.random.shuffle(train_idx)
+        np.random.shuffle(val_idx)
+        np.random.shuffle(test_idx)
+
+        from collections import Counter
+        print(f"Split estratificado por modalidade (Total: {num_samples}):")
+        print(f"  Treino ({len(train_idx)}): {dict(Counter(mods[train_idx]))}")
+        print(f"  Validação ({len(val_idx)}): {dict(Counter(mods[val_idx]))}")
+        print(f"  Teste ({len(test_idx)}): {dict(Counter(mods[test_idx]))}")
+    else:
+        indices = np.arange(num_samples)
+        np.random.shuffle(indices)
+
+        train_end = int(train_ratio * num_samples)
+        val_end = int((train_ratio + val_ratio) * num_samples)
+
+        train_idx = indices[:train_end]
+        val_idx = indices[train_end:val_end]
+        test_idx = indices[val_end:]
 
     X_train, y_train = images[train_idx], masks[train_idx]
     X_val, y_val = images[val_idx], masks[val_idx]
     X_test, y_test = images[test_idx], masks[test_idx]
 
     return X_train, y_train, X_val, y_val, X_test, y_test
+
 
 
 # --- Treinamento, Métricas e Extração de Instâncias Ingênua ---
