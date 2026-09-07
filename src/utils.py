@@ -1144,3 +1144,138 @@ def compare_baseline_vs_trilha_a(results_baseline, results_trilha_a, dataset_nam
 
     plt.tight_layout()
     plt.show()
+
+
+# =============================================================================
+# --- PARTE 3: ABLAÇÕES (EIXO 1 - RESOLUÇÃO E EIXO 2 - FUNÇÃO DE PERDA) ---
+# =============================================================================
+
+
+class SegNet(nn.Module):
+    """Modelo SegNet com recuperação de resolução por Max Unpooling e índices salvos no pooling (slides 14 e 16)."""
+    def __init__(self, out_channels=3):
+        super().__init__()
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(3, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(True),
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(True)
+        )
+        self.pool1 = nn.MaxPool2d(2, 2, return_indices=True)
+
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(32, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
+            nn.Conv2d(64, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(True)
+        )
+        self.pool2 = nn.MaxPool2d(2, 2, return_indices=True)
+
+        self.enc3 = nn.Sequential(
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True),
+            nn.Conv2d(128, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True)
+        )
+        self.pool3 = nn.MaxPool2d(2, 2, return_indices=True)
+
+        self.enc4 = nn.Sequential(
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(True),
+            nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(True)
+        )
+        self.pool4 = nn.MaxPool2d(2, 2, return_indices=True)
+
+        self.center = nn.Sequential(
+            nn.Conv2d(256, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(True)
+        )
+
+        self.unpool4 = nn.MaxUnpool2d(2, 2)
+        self.dec4 = nn.Sequential(
+            nn.Conv2d(256, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True),
+            nn.Conv2d(128, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(True)
+        )
+
+        self.unpool3 = nn.MaxUnpool2d(2, 2)
+        self.dec3 = nn.Sequential(
+            nn.Conv2d(128, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(True),
+            nn.Conv2d(64, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(True)
+        )
+
+        self.unpool2 = nn.MaxUnpool2d(2, 2)
+        self.dec2 = nn.Sequential(
+            nn.Conv2d(64, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(True),
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(True)
+        )
+
+        self.unpool1 = nn.MaxUnpool2d(2, 2)
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(32, 32, 3, padding=1), nn.BatchNorm2d(32), nn.ReLU(True),
+            nn.Conv2d(32, out_channels, 1)
+        )
+
+    def forward(self, x):
+        e1 = self.enc1(x)
+        p1, ind1 = self.pool1(e1)
+        e2 = self.enc2(p1)
+        p2, ind2 = self.pool2(e2)
+        e3 = self.enc3(p2)
+        p3, ind3 = self.pool3(e3)
+        e4 = self.enc4(p3)
+        p4, ind4 = self.pool4(e4)
+
+        c = self.center(p4)
+
+        d4 = self.dec4(self.unpool4(c, ind4))
+        d3 = self.dec3(self.unpool3(d4, ind3))
+        d2 = self.dec2(self.unpool2(d3, ind2))
+        d1 = self.dec1(self.unpool1(d2, ind1))
+        return d1
+
+
+
+def rodar_ablação_seeds(modelo_fn, X_train, y_train_3c, X_val, y_val_3c, X_test, y_test_gt,
+                        device, seeds=(42, 123), class_weights=None, gamma=0.0,
+                        num_epochs=12, batch_size=16, learning_rate=0.0005,
+                        threshold_interior=0.35, threshold_fg=0.35):
+    """Executa o treinamento e avaliação para múltiplas seeds reportando média e desvio padrão."""
+    maps = []
+    erros = []
+
+    for seed in seeds:
+        torch.manual_seed(seed)
+        np.random.seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        model = modelo_fn()
+        train_model_trilha_a(
+            model, X_train, y_train_3c, X_val, y_val_3c, device,
+            class_weights=class_weights, gamma=gamma, num_epochs=num_epochs,
+            batch_size=batch_size, learning_rate=learning_rate
+        )
+
+        res = evaluate_model_instances_trilha_a(
+            model, X_test, y_test_gt, device,
+            threshold_interior=threshold_interior, threshold_fg=threshold_fg
+        )
+        maps.append(res['mean_mAP'])
+        erros.append(res['mean_count_error'])
+
+    return {
+        "mAP_mean": float(np.mean(maps)),
+        "mAP_std": float(np.std(maps)),
+        "err_mean": float(np.mean(erros)),
+        "err_std": float(np.std(erros)),
+        "seeds": seeds,
+        "maps_raw": maps,
+        "erros_raw": erros,
+    }
+
+
+def imprimir_tabela_ablação(resultados_dict, titulo="Ablações"):
+    """Exibe os resultados da ablação em formato tabular com média e desvio padrão."""
+    print(f"\n{'='*75}")
+    print(f"   TABELA DE ABLAÇÃO: {titulo.upper()} (2 SEEDS: MÉDIA ± DESVIO)")
+    print(f"{'='*75}")
+    print(f"{'Configuração':<35} | {'mAP@[.50:.95]':<18} | {'Erro Médio Contagem':<18}")
+    print("-" * 75)
+    for nome, r in resultados_dict.items():
+        map_str = f"{r['mAP_mean']:.4f} ± {r['mAP_std']:.4f}"
+        err_str = f"{r['err_mean']:.2f} ± {r['err_std']:.2f}"
+        print(f"{nome:<35} | {map_str:<18} | {err_str:<18}")
+    print("=" * 75)
+
