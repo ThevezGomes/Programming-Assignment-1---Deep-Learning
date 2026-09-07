@@ -1279,3 +1279,475 @@ def imprimir_tabela_ablação(resultados_dict, titulo="Ablações"):
         print(f"{nome:<35} | {map_str:<18} | {err_str:<18}")
     print("=" * 75)
 
+
+# =============================================================================
+# --- PARTE 4: INFERÊNCIA EM MOSAICO (SLIDE 83 E FUSÃO DE INSTÂNCIAS) ---
+# =============================================================================
+
+class DisjointSetUnion:
+    """Estrutura Disjoint Set Union (DSU / Union-Find) para agrupamento de instâncias entre tiles."""
+    def __init__(self):
+        self.parent = {}
+
+    def find(self, i):
+        if i not in self.parent:
+            self.parent[i] = i
+            return i
+        if self.parent[i] == i:
+            return i
+        self.parent[i] = self.find(self.parent[i])
+        return self.parent[i]
+
+    def union(self, i, j):
+        root_i = self.find(i)
+        root_j = self.find(j)
+        if root_i != root_j:
+            self.parent[root_i] = root_j
+
+
+def criar_mosaico_imagens(images, masks, grid_shape=(2, 2)):
+    """
+    Parte 4 (Item 1): Monta uma imagem grande (mosaico de várias imagens do dataset)
+    e reindexa as máscaras de instâncias para garantir unicidade global de cada núcleo.
+    """
+    rows, cols = grid_shape
+    assert len(images) >= rows * cols, f"Imagens insuficientes ({len(images)}) para a grade {grid_shape}"
+    h, w, c = images[0].shape
+    mosaic_img = np.zeros((h * rows, w * cols, c), dtype=images[0].dtype)
+    mosaic_mask = np.zeros((h * rows, w * cols), dtype=np.int32)
+
+    current_max_id = 0
+    idx = 0
+    for r in range(rows):
+        for c_idx in range(cols):
+            img_curr = images[idx]
+            mask_curr = masks[idx]
+
+            y_start = r * h
+            x_start = c_idx * w
+
+            mosaic_img[y_start:y_start + h, x_start:x_start + w] = img_curr
+
+            u_ids = np.unique(mask_curr[mask_curr > 0])
+            reindexed_mask = np.zeros_like(mask_curr, dtype=np.int32)
+            for new_offset, old_id in enumerate(u_ids, start=1):
+                reindexed_mask[mask_curr == old_id] = current_max_id + new_offset
+            current_max_id += len(u_ids)
+
+            mosaic_mask[y_start:y_start + h, x_start:x_start + w] = reindexed_mask
+            idx += 1
+
+    return mosaic_img, mosaic_mask
+
+
+def inferencia_mosaico_tiles(model, mosaic_img, tile_size=128, stride=96, device="cpu",
+                             threshold_interior=0.35, threshold_fg=0.35, min_marker_size=1):
+    """
+    Parte 4 (Item 2): Executa inferência em tiles com sobreposição (slide 83 da aula).
+    - Agrega média de probabilidades semânticas nos patches sobrepostos ('average the results');
+    - Extrai instâncias locais por tile via Watershed (Trilha A) ou limiar ingênuo;
+    - Monta o mosaico antes da correção considerando a parte interna de cada patch ('consider the inner part'),
+      evidenciando a fratura de objetos que cruzam as fronteiras.
+    """
+    model.eval()
+    H, W = mosaic_img.shape[:2]
+
+    # Grade regular de coordenadas de patches com cobertura completa
+    y_starts = list(range(0, H - tile_size + 1, stride))
+    if y_starts[-1] + tile_size < H:
+        y_starts.append(H - tile_size)
+    x_starts = list(range(0, W - tile_size + 1, stride))
+    if x_starts[-1] + tile_size < W:
+        x_starts.append(W - tile_size)
+
+    y_starts = sorted(list(set(y_starts)))
+    x_starts = sorted(list(set(x_starts)))
+
+    # Acumuladores de probabilidades semânticas (Slide 83: 'Average the results')
+    dummy_in = torch.zeros(1, 3, tile_size, tile_size, device=device)
+    with torch.no_grad():
+        dummy_out = model(dummy_in)
+    out_channels = dummy_out.shape[1]
+
+    semantic_prob_mosaic = np.zeros((out_channels, H, W), dtype=np.float32)
+    weight_mosaic = np.zeros((H, W), dtype=np.float32)
+
+    tiles_data = []
+    tile_idx = 0
+
+    with torch.no_grad():
+        for y in y_starts:
+            for x in x_starts:
+                patch = mosaic_img[y:y + tile_size, x:x + tile_size]
+                patch_tensor = torch.from_numpy(patch).float().permute(2, 0, 1).unsqueeze(0).contiguous().to(device) / 255.0
+                logits = model(patch_tensor)
+
+                if out_channels == 3:
+                    probs = F.softmax(logits, dim=1).squeeze(0).cpu().numpy()
+                    labeled_mask, num_instances = decodificar_watershed_trilha_a(
+                        probs, threshold_interior=threshold_interior, threshold_fg=threshold_fg, min_marker_size=min_marker_size
+                    )
+                else:
+                    probs = torch.sigmoid(logits).squeeze().cpu().numpy()
+                    if probs.ndim == 2:
+                        labeled_mask, num_instances = extract_instances_naive(probs, threshold=0.5)
+                        probs = np.expand_dims(probs, 0)
+                    else:
+                        labeled_mask, num_instances = extract_instances_naive(probs[0], threshold=0.5)
+
+                semantic_prob_mosaic[:, y:y + tile_size, x:x + tile_size] += probs
+                weight_mosaic[y:y + tile_size, x:x + tile_size] += 1.0
+
+                tiles_data.append({
+                    'tile_id': tile_idx,
+                    'y': y, 'x': x,
+                    'local_mask': labeled_mask,
+                    'num_instances': num_instances,
+                    'probs': probs,
+                    'center': (y + tile_size / 2.0, x + tile_size / 2.0)
+                })
+                tile_idx += 1
+
+    semantic_prob_mosaic /= np.maximum(weight_mosaic, 1e-6)
+
+    # Montagem do mosaico antes da correção: Slide 83 ('Consider the inner part')
+    pred_mosaic_sem_fusao = np.zeros((H, W), dtype=np.int32)
+    tile_id_offsets = {}
+    global_counter = 0
+    for t in tiles_data:
+        tile_id_offsets[t['tile_id']] = global_counter
+        global_counter += t['num_instances']
+
+    for r in range(H):
+        for c in range(W):
+            best_t = None
+            min_d2 = 1e9
+            for t in tiles_data:
+                if t['y'] <= r < t['y'] + tile_size and t['x'] <= c < t['x'] + tile_size:
+                    cy, cx = t['center']
+                    d2 = (r - cy) ** 2 + (c - cx) ** 2
+                    if d2 < min_d2:
+                        min_d2 = d2
+                        best_t = t
+            if best_t is not None:
+                loc_id = best_t['local_mask'][r - best_t['y'], c - best_t['x']]
+                if loc_id > 0:
+                    pred_mosaic_sem_fusao[r, c] = tile_id_offsets[best_t['tile_id']] + loc_id
+
+    # Reindexar IDs contíguos de 1 a N_sem_fusao
+    u_sem = np.unique(pred_mosaic_sem_fusao[pred_mosaic_sem_fusao > 0])
+    pred_sem_compact = np.zeros_like(pred_mosaic_sem_fusao)
+    for new_id, old_id in enumerate(u_sem, start=1):
+        pred_sem_compact[pred_mosaic_sem_fusao == old_id] = new_id
+
+    return pred_sem_compact, semantic_prob_mosaic, tiles_data
+
+
+def fundir_instancias_tiles(tiles_data, image_shape, tile_size=128, min_overlap_iou=0.20, min_relative_inter=0.30):
+    """
+    Parte 4 (Item 4): Algoritmo de correção por fusão de instâncias entre tiles sobrepostos.
+    - Avalia a concordância espacial de cada par de instâncias na faixa de sobreposição (overlap strip);
+    - Agrupa os fragmentos correspondentes ao mesmo objeto biológico via Disjoint Set Union (Union-Find);
+    - Reconstrói a máscara global contínua unificando as metades cortadas sob o mesmo ID global.
+    """
+    H, W = image_shape[:2]
+    dsu = DisjointSetUnion()
+
+    # Compara pares de tiles adjacentes que possuem sobreposição
+    num_tiles = len(tiles_data)
+    for i in range(num_tiles):
+        for j in range(i + 1, num_tiles):
+            tA = tiles_data[i]
+            tB = tiles_data[j]
+
+            y_min = max(tA['y'], tB['y'])
+            y_max = min(tA['y'] + tile_size, tB['y'] + tile_size)
+            x_min = max(tA['x'], tB['x'])
+            x_max = min(tA['x'] + tile_size, tB['x'] + tile_size)
+
+            if y_max > y_min and x_max > x_min:
+                # Região de sobreposição física entre os tiles A e B
+                subA = tA['local_mask'][y_min - tA['y']:y_max - tA['y'], x_min - tA['x']:x_max - tA['x']]
+                subB = tB['local_mask'][y_min - tB['y']:y_max - tB['y'], x_min - tB['x']:x_max - tB['x']]
+
+                uA = np.unique(subA[subA > 0])
+                uB = np.unique(subB[subB > 0])
+
+                for instA in uA:
+                    maskA = (subA == instA)
+                    areaA = maskA.sum()
+                    for instB in uB:
+                        maskB = (subB == instB)
+                        inter = np.logical_and(maskA, maskB).sum()
+                        if inter > 0:
+                            areaB = maskB.sum()
+                            union = areaA + areaB - inter
+                            iou = inter / union
+                            rel_inter = inter / min(areaA, areaB)
+
+                            if iou >= min_overlap_iou or rel_inter >= min_relative_inter:
+                                dsu.union((tA['tile_id'], instA), (tB['tile_id'], instB))
+
+    # Mapeia raízes do DSU para IDs globais contíguos (1 .. N_fused)
+    root_to_id = {}
+    curr_id = 1
+    for t in tiles_data:
+        for inst in range(1, t['num_instances'] + 1):
+            r = dsu.find((t['tile_id'], inst))
+            if r not in root_to_id:
+                root_to_id[r] = curr_id
+                curr_id += 1
+
+    # Reconstrói a máscara global com instâncias fundidas
+    pred_mosaic_com_fusao = np.zeros((H, W), dtype=np.int32)
+    for t in tiles_data:
+        for r_loc in range(tile_size):
+            for c_loc in range(tile_size):
+                inst = t['local_mask'][r_loc, c_loc]
+                if inst > 0:
+                    gy = t['y'] + r_loc
+                    gx = t['x'] + c_loc
+                    gid = root_to_id[dsu.find((t['tile_id'], inst))]
+                    pred_mosaic_com_fusao[gy, gx] = gid
+
+    return pred_mosaic_com_fusao
+
+
+def plot_objeto_fronteira_tiles(mosaic_img, mosaic_gt, pred_sem_fusao, pred_com_fusao,
+                                tiles_data, tile_size=128, margin=20):
+    """
+    Parte 4 (Item 3): Mostra detalhadamente o que acontece com um objeto que cai na fronteira entre dois tiles.
+    Exibe a imagem geral com os contornos dos tiles, e um zoom na fronteira comparando:
+    Ground Truth, Predição no Tile A, Predição no Tile B, Mosaico Sem Fusão (cortado) e Mosaico Com Fusão (unificado).
+    """
+    H, W = mosaic_gt.shape
+
+    # Busca automática pelo núcleo com maior fratura na fronteira antes da correção
+    unique_gt = np.unique(mosaic_gt[mosaic_gt > 0])
+    best_uid = None
+    max_split = 1
+    for uid in unique_gt:
+        mask_u = (mosaic_gt == uid)
+        preds_in_u = np.unique(pred_sem_fusao[mask_u])
+        preds_in_u = preds_in_u[preds_in_u > 0]
+        if len(preds_in_u) > max_split:
+            max_split = len(preds_in_u)
+            best_uid = uid
+
+    if best_uid is None:
+        min_dist_border = 1e9
+        for uid in unique_gt:
+            coords = np.argwhere(mosaic_gt == uid)
+            cy, cx = coords.mean(axis=0)
+            for t in tiles_data:
+                d = min(abs(cy - t['y']), abs(cy - (t['y'] + tile_size)),
+                        abs(cx - t['x']), abs(cx - (t['x'] + tile_size)))
+                if d < min_dist_border:
+                    min_dist_border = d
+                    best_uid = uid
+
+    coords = np.argwhere(mosaic_gt == best_uid)
+    y_min_roi = max(0, coords[:, 0].min() - margin)
+    y_max_roi = min(H, coords[:, 0].max() + margin + 1)
+    x_min_roi = max(0, coords[:, 1].min() - margin)
+    x_max_roi = min(W, coords[:, 1].max() + margin + 1)
+
+    cy, cx = coords.mean(axis=0)
+
+    touching_tiles = []
+    for t in tiles_data:
+        if t['y'] <= cy <= t['y'] + tile_size and t['x'] <= cx <= t['x'] + tile_size:
+            touching_tiles.append(t)
+
+    tA = touching_tiles[0] if len(touching_tiles) > 0 else tiles_data[0]
+    tB = touching_tiles[1] if len(touching_tiles) > 1 else (tiles_data[1] if len(tiles_data) > 1 else tiles_data[0])
+
+    def get_tile_crop(t):
+        full_tile_mask = np.zeros((H, W), dtype=np.int32)
+        full_tile_mask[t['y']:t['y'] + tile_size, t['x']:t['x'] + tile_size] = t['local_mask']
+        return full_tile_mask[y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+
+    crop_img = mosaic_img[y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+    crop_gt = mosaic_gt[y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+    crop_tA = get_tile_crop(tA)
+    crop_tB = get_tile_crop(tB)
+    crop_sem = pred_sem_fusao[y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+    crop_com = pred_com_fusao[y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+
+    ids_sem = np.unique(crop_sem[crop_gt == best_uid])
+    ids_sem = ids_sem[ids_sem > 0]
+    ids_com = np.unique(crop_com[crop_gt == best_uid])
+    ids_com = ids_com[ids_com > 0]
+
+    plt.figure(figsize=(18, 7))
+
+    plt.subplot(2, 3, 1)
+    plt.imshow(mosaic_img)
+    plt.plot([x_min_roi, x_max_roi, x_max_roi, x_min_roi, x_min_roi],
+             [y_min_roi, y_min_roi, y_max_roi, y_max_roi, y_min_roi], 'r-', linewidth=2.5, label='ROI Fronteira')
+    for t in tiles_data:
+        plt.plot([t['x'], t['x'] + tile_size, t['x'] + tile_size, t['x'], t['x']],
+                 [t['y'], t['y'], t['y'] + tile_size, t['y'] + tile_size, t['y']],
+                 'w--', alpha=0.4, linewidth=1)
+    plt.title(f'Mosaico Completo ({H}x{W}) e Grid de Tiles')
+    plt.axis('off')
+    plt.legend(loc='lower right')
+
+    plt.subplot(2, 3, 2)
+    plt.imshow(crop_img)
+    plt.imshow(np.ma.masked_where(crop_gt == 0, crop_gt), cmap='spring', alpha=0.6)
+    plt.title(f'Ground Truth (Núcleo #{best_uid}: Unificado)')
+    plt.axis('off')
+
+    plt.subplot(2, 3, 3)
+    plt.imshow(crop_img)
+    plt.imshow(np.ma.masked_where(crop_tA == 0, crop_tA), cmap='cool', alpha=0.6)
+    plt.title(f'Predição Tile {tA["tile_id"]} (Local)')
+    plt.axis('off')
+
+    plt.subplot(2, 3, 4)
+    plt.imshow(crop_img)
+    plt.imshow(np.ma.masked_where(crop_tB == 0, crop_tB), cmap='winter', alpha=0.6)
+    plt.title(f'Predição Tile {tB["tile_id"]} (Local)')
+    plt.axis('off')
+
+    plt.subplot(2, 3, 5)
+    plt.imshow(crop_img)
+    plt.imshow(np.ma.masked_where(crop_sem == 0, crop_sem), cmap='nipy_spectral', alpha=0.65)
+    plt.title(f'Sem Fusão: CORTADO! ({len(ids_sem)} IDs: {ids_sem})')
+    plt.axis('off')
+
+    plt.subplot(2, 3, 6)
+    plt.imshow(crop_img)
+    plt.imshow(np.ma.masked_where(crop_com == 0, crop_com), cmap='nipy_spectral', alpha=0.65)
+    plt.title(f'Com Fusão: UNIFICADO! (1 ID: {ids_com})')
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+    print(f"\n--- [Diagnóstico do Objeto na Fronteira (Item 3)] ---")
+    print(f"Objeto GT #{best_uid} localizado na coordenada ({int(cy)}, {int(cx)}):")
+    print(f" - Antes da Fusão (Slide 83): Cortado ao meio em {len(ids_sem)} IDs independentes ({ids_sem}).")
+    print(f" - Após a Fusão (Item 4): Unificado sob o único ID global ({ids_com[0] if len(ids_com) > 0 else 'N/A'}).")
+
+
+def avaliar_e_comparar_mosaico(mosaic_gt, pred_sem_fusao, pred_com_fusao,
+                               iou_thresholds=np.arange(0.50, 1.00, 0.05), matching_method="hungarian"):
+    """
+    Parte 4 (Item 4): Avalia e compara quantitativamente o mAP@[.50:.95] e o erro absoluto de contagem
+    no mosaico completo antes e depois da correção por fusão de instâncias.
+    """
+    num_gt = len(np.unique(mosaic_gt[mosaic_gt > 0]))
+    num_sem = len(np.unique(pred_sem_fusao[pred_sem_fusao > 0]))
+    num_com = len(np.unique(pred_com_fusao[pred_com_fusao > 0]))
+
+    iou_mat_sem = calculate_instance_iou_matrix(mosaic_gt, num_gt, pred_sem_fusao, num_sem)
+    iou_mat_com = calculate_instance_iou_matrix(mosaic_gt, num_gt, pred_com_fusao, num_com)
+
+    aps_sem = []
+    aps_com = []
+
+    match_fn = match_instances_hungarian if matching_method == "hungarian" else match_instances_greedy
+
+    for t in iou_thresholds:
+        tp_sem = match_fn(iou_mat_sem, t)
+        denom_sem = num_gt + num_sem - tp_sem
+        aps_sem.append(tp_sem / denom_sem if denom_sem > 0 else 0.0)
+
+        tp_com = match_fn(iou_mat_com, t)
+        denom_com = num_gt + num_com - tp_com
+        aps_com.append(tp_com / denom_com if denom_com > 0 else 0.0)
+
+    aps_sem = np.array(aps_sem, dtype=np.float32)
+    aps_com = np.array(aps_com, dtype=np.float32)
+
+    map_sem = float(np.mean(aps_sem))
+    map_com = float(np.mean(aps_com))
+
+    err_sem = abs(num_sem - num_gt)
+    err_com = abs(num_com - num_gt)
+
+    print(f"\n=======================================================================")
+    print(f"      COMPARAÇÃO NO MOSAICO: ANTES VS DEPOIS DA FUSÃO DE INSTÂNCIAS     ")
+    print(f"=======================================================================")
+    print(f"{'Métrica':<35} | {'Antes da Fusão':<16} | {'Depois da Fusão':<16} | {'Variação':<10}")
+    print("-" * 75)
+    print(f"{'mAP@[.50:.95]':<35} | {map_sem:<16.4f} | {map_com:<16.4f} | {map_com - map_sem:+10.4f}")
+    print(f"{'AP @ IoU=0.50':<35} | {aps_sem[0]:<16.4f} | {aps_com[0]:<16.4f} | {aps_com[0] - aps_sem[0]:+10.4f}")
+    print(f"{'AP @ IoU=0.75':<35} | {aps_sem[5]:<16.4f} | {aps_com[5]:<16.4f} | {aps_com[5] - aps_sem[5]:+10.4f}")
+    print(f"{'Número de Instâncias Preditas':<35} | {num_sem:<16d} | {num_com:<16d} | {num_com - num_sem:+10d}")
+    print(f"{'Instâncias no Ground Truth':<35} | {num_gt:<16d} | {num_gt:<16d} | {'--':<10}")
+    print(f"{'Erro Absoluto de Contagem':<35} | {err_sem:<16d} | {err_com:<16d} | {err_com - err_sem:+10d}")
+    print("=" * 75)
+
+    plt.figure(figsize=(14, 5))
+
+    plt.subplot(1, 2, 1)
+    plt.plot(iou_thresholds, aps_sem, 'r-o', linewidth=2, label=f'Antes da Fusão (mAP = {map_sem:.4f})')
+    plt.plot(iou_thresholds, aps_com, 'b-s', linewidth=2, label=f'Depois da Fusão (mAP = {map_com:.4f})')
+    plt.title('Precisão Média (AP) por Limiar de IoU')
+    plt.xlabel('Limiar de IoU')
+    plt.ylabel('AP')
+    plt.ylim(-0.05, 1.05)
+    plt.grid(True, linestyle='--', alpha=0.5)
+    plt.legend()
+
+    plt.subplot(1, 2, 2)
+    categories = ['mAP@[.50:.95] (x100)', 'Erro de Contagem']
+    antes_vals = [map_sem * 100, err_sem]
+    depois_vals = [map_com * 100, err_com]
+
+    x_bar = np.arange(len(categories))
+    bar_width = 0.35
+    plt.bar(x_bar - bar_width / 2, antes_vals, bar_width, label='Antes da Fusão', color='crimson', alpha=0.8)
+    plt.bar(x_bar + bar_width / 2, depois_vals, bar_width, label='Depois da Fusão', color='royalblue', alpha=0.8)
+    plt.xticks(x_bar, categories)
+    plt.ylabel('Valor')
+    plt.title('Impacto da Correção por Fusão')
+    plt.legend()
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    plt.tight_layout()
+    plt.show()
+
+    return {
+        "mAP_sem": map_sem, "mAP_com": map_com,
+        "err_sem": err_sem, "err_com": err_com,
+        "aps_sem": aps_sem, "aps_com": aps_com,
+        "num_gt": num_gt, "num_sem": num_sem, "num_com": num_com
+    }
+
+
+def plot_mosaico_completo(mosaic_img, mosaic_gt, pred_sem_fusao, pred_com_fusao):
+    """Exibe visualmente o mosaico completo: Imagem, Ground Truth, Predição Sem Fusão e Predição Com Fusão."""
+    num_gt = len(np.unique(mosaic_gt[mosaic_gt > 0]))
+    num_sem = len(np.unique(pred_sem_fusao[pred_sem_fusao > 0]))
+    num_com = len(np.unique(pred_com_fusao[pred_com_fusao > 0]))
+
+    plt.figure(figsize=(16, 4))
+
+    plt.subplot(1, 4, 1)
+    plt.imshow(mosaic_img)
+    plt.title(f'Mosaico de Entrada ({mosaic_img.shape[0]}x{mosaic_img.shape[1]})')
+    plt.axis('off')
+
+    plt.subplot(1, 4, 2)
+    plt.imshow(mosaic_gt, cmap='nipy_spectral')
+    plt.title(f'Ground Truth ({num_gt} núcleos)')
+    plt.axis('off')
+
+    plt.subplot(1, 4, 3)
+    plt.imshow(pred_sem_fusao, cmap='nipy_spectral')
+    plt.title(f'Sem Fusão ({num_sem} det. - Fraturas)')
+    plt.axis('off')
+
+    plt.subplot(1, 4, 4)
+    plt.imshow(pred_com_fusao, cmap='nipy_spectral')
+    plt.title(f'Com Fusão ({num_com} det. - Unificado)')
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
+
+
