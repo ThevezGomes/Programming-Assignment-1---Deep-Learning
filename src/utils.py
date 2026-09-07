@@ -37,6 +37,12 @@ try:
         plot_quantify_failure, plot_trilha_a_samples, plot_trilha_a_predictions,
         plot_objeto_fronteira_tiles, plot_mosaico_completo
     )
+    from .failures import (
+        calcular_campo_receptivo_resnet18, calcular_campo_receptivo_atrous,
+        imprimir_tabela_campo_receptivo, extrair_diametros_objetos,
+        plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
+        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
+    )
 except ImportError:
     from models import create_segmentation_head, DecoderBlock, UNetResNet, SegNet
     from losses import FocalLossMultiClass
@@ -63,3 +69,10 @@ except ImportError:
         plot_quantify_failure, plot_trilha_a_samples, plot_trilha_a_predictions,
         plot_objeto_fronteira_tiles, plot_mosaico_completo
     )
+    from failures import (
+        calcular_campo_receptivo_resnet18, calcular_campo_receptivo_atrous,
+        imprimir_tabela_campo_receptivo, extrair_diametros_objetos,
+        plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
+        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
+    )
+
