@@ -135,33 +135,37 @@ def inferencia_mosaico_tiles(model, mosaic_img, tile_size=128, stride=96, device
 
     semantic_prob_mosaic /= np.maximum(weight_mosaic, 1e-6)
 
-    pred_mosaic_sem_fusao = np.zeros((H, W), dtype=np.int32)
+    overlap = tile_size - stride  # faixa de sobreposição em pixels
+    margin = overlap // 2         # metade da faixa em cada lado
+
     tile_id_offsets = {}
     global_counter = 0
     for t in tiles_data:
         tile_id_offsets[t['tile_id']] = global_counter
         global_counter += t['num_instances']
 
-    for r in range(H):
-        for c in range(W):
-            best_t = None
-            min_d2 = 1e9
-            for t in tiles_data:
-                if t['y'] <= r < t['y'] + tile_size and t['x'] <= c < t['x'] + tile_size:
-                    cy, cx = t['center']
-                    d2 = (r - cy) ** 2 + (c - cx) ** 2
-                    if d2 < min_d2:
-                        min_d2 = d2
-                        best_t = t
-            if best_t is not None:
-                loc_id = best_t['local_mask'][r - best_t['y'], c - best_t['x']]
-                if loc_id > 0:
-                    pred_mosaic_sem_fusao[r, c] = tile_id_offsets[best_t['tile_id']] + loc_id
+    pred_mosaic_sem_fusao = np.zeros((H, W), dtype=np.int32)
+    for t in tiles_data:
+        y, x = t['y'], t['x']
+        # Região interna: exclui margem nas bordas sobrepostas (mas não nas bordas do mosaico)
+        y0 = margin if y > 0 else 0
+        y1 = tile_size - margin if y + tile_size < H else tile_size
+        x0 = margin if x > 0 else 0
+        x1 = tile_size - margin if x + tile_size < W else tile_size
+
+        local_region = t['local_mask'][y0:y1, x0:x1]
+        global_region = np.where(
+            local_region > 0,
+            local_region + tile_id_offsets[t['tile_id']],
+            0
+        )
+        pred_mosaic_sem_fusao[y + y0:y + y1, x + x0:x + x1] = global_region
 
     u_sem = np.unique(pred_mosaic_sem_fusao[pred_mosaic_sem_fusao > 0])
     pred_sem_compact = np.zeros_like(pred_mosaic_sem_fusao)
     for new_id, old_id in enumerate(u_sem, start=1):
         pred_sem_compact[pred_mosaic_sem_fusao == old_id] = new_id
+
 
     return pred_sem_compact, semantic_prob_mosaic, tiles_data
 
@@ -220,14 +224,25 @@ def fundir_instancias_tiles(tiles_data, image_shape, tile_size=128, min_overlap_
 
     pred_mosaic_com_fusao = np.zeros((H, W), dtype=np.int32)
     for t in tiles_data:
-        for r_loc in range(tile_size):
-            for c_loc in range(tile_size):
-                inst = t['local_mask'][r_loc, c_loc]
-                if inst > 0:
-                    gy = t['y'] + r_loc
-                    gx = t['x'] + c_loc
-                    gid = root_to_id[dsu.find((t['tile_id'], inst))]
-                    pred_mosaic_com_fusao[gy, gx] = gid
+        local = t['local_mask']                     # shape (tile_size, tile_size)
+        fg_mask = local > 0
+        if not np.any(fg_mask):
+            continue
+
+        unique_insts = np.unique(local[fg_mask])
+        max_inst = int(unique_insts.max())
+        id_map = np.zeros(max_inst + 1, dtype=np.int32)
+        for inst in unique_insts:
+            id_map[int(inst)] = root_to_id[dsu.find((t['tile_id'], int(inst)))]
+
+        global_patch = np.where(fg_mask, id_map[local], 0)
+        gy_slice = slice(t['y'], t['y'] + tile_size)
+        gx_slice = slice(t['x'], t['x'] + tile_size)
+        # np.maximum resolve conflitos em pixels sobrepostos entre tiles
+        pred_mosaic_com_fusao[gy_slice, gx_slice] = np.maximum(
+            pred_mosaic_com_fusao[gy_slice, gx_slice],
+            global_patch
+        )
 
     return pred_mosaic_com_fusao
 

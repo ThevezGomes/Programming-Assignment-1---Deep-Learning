@@ -170,18 +170,29 @@ def plot_campo_receptivo_vs_dataset(diametros, tabela_rf):
     n, bins, patches = plt.hist(diametros, bins=45, color='#4A90E2', alpha=0.75, 
                                 edgecolor='black', density=True, label='Distribuição dos Núcleos (DSB2018)')
     
-    # Marcadores de campo receptivo dos skips e bottleneck
-    rf_skips = {
-        "Skip Layer 1 (43 px)": (43, '#D0021B', '--'),
-        "Skip Layer 2 (99 px)": (99, '#F5A623', '-.'),
-        "Skip Layer 3 (211 px)": (211, '#7ED321', ':'),
-        "Bottleneck Center (563 px)": (563, '#9013FE', '-')
-    }
-    
+    # Extrair RFs dinamicamente da tabela calculada
+    def _rf_de(nome_substr):
+        for row in tabela_rf:
+            if nome_substr in row['nome']:
+                return row['receptive_field']
+        return None
+
+    rf_skips = {}
+    for substr, cor, estilo, label in [
+        ("[Skip L1]", '#D0021B', '--', "Skip Layer 1"),
+        ("[Skip L2]", '#F5A623', '-.', "Skip Layer 2"),
+        ("[Skip L3]", '#7ED321', ':', "Skip Layer 3"),
+        ("[Bottleneck]", '#9013FE', '-', "Bottleneck Center"),
+    ]:
+        val = _rf_de(substr)
+        if val is not None:
+            rf_skips[f"{label} ({val} px)"] = (val, cor, estilo)
+
     y_max = plt.gca().get_ylim()[1]
     for label, (rf_val, cor, estilo) in rf_skips.items():
-        if rf_val <= 140: # foca nas linhas visíveis no intervalo de interesse
+        if rf_val <= plt.gca().get_xlim()[1]:
             plt.axvline(rf_val, color=cor, linestyle=estilo, linewidth=2, label=f'RF {label}')
+
         
     plt.title("Campo Receptivo Teórico do Encoder vs. Distribuição de Diâmetros dos Objetos", fontsize=13, fontweight='bold')
     plt.xlabel("Diâmetro Equivalente do Objeto (pixels) / Campo Receptivo (pixels)", fontsize=11)
