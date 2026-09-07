@@ -279,30 +279,44 @@ def minerar_5_falhas_estruturais(model, X_test, y_test_gt, device):
             })
             
     # Seleção dos 5 casos com patologias verdadeiras e distintas:
-    # Caso 1: Núcleo Gigante fatiado (célula grande com diâmetro elevado e super-fragmentação num_pred > num_gt)
+    # Caso 1: Núcleo Gigante fatiado (célula grande com diâmetro elevado)
     cand_c1 = [m for m in metricas if m["max_diam"] >= 35.0 and m["num_pred"] > m["num_gt"]]
-    idx_c1 = sorted(cand_c1, key=lambda x: x["ap50"])[0]["idx"] if cand_c1 else \
-             sorted([m for m in metricas if m["max_diam"] >= 30.0], key=lambda x: x["ap50"])[0]["idx"]
+    if not cand_c1:
+        cand_c1 = [m for m in metricas if m["max_diam"] >= 25.0 and m["num_pred"] > m["num_gt"]]
+    if not cand_c1:
+        cand_c1 = [m for m in metricas if m["max_diam"] >= 20.0]
+    idx_c1 = sorted(cand_c1, key=lambda x: (x["ap50"], -x["max_diam"]))[0]["idx"] if cand_c1 else \
+             sorted(metricas, key=lambda x: -x["max_diam"])[0]["idx"]
 
     # Caso 2: Aglomerado Hiper-Denso de células minúsculas (muitos núcleos pequenos com sub-segmentação severa num_gt >> num_pred)
-    cand_c2 = [m for m in metricas if m["num_gt"] >= 60 and m["num_pred"] < m["num_gt"]]
+    cand_c2 = [m for m in metricas if m["idx"] != idx_c1 and m["num_gt"] >= 60 and m["num_pred"] < m["num_gt"]]
+    if not cand_c2:
+        cand_c2 = [m for m in metricas if m["idx"] != idx_c1 and m["num_gt"] >= 40 and m["num_pred"] < m["num_gt"]]
+    if not cand_c2:
+        cand_c2 = [m for m in metricas if m["idx"] != idx_c1 and m["num_gt"] >= 20 and m["num_pred"] < m["num_gt"]]
     idx_c2 = sorted(cand_c2, key=lambda x: (x["ap50"], -x["err"]))[0]["idx"] if cand_c2 else \
-             sorted(metricas, key=lambda x: -x["num_gt"])[0]["idx"]
+             sorted([m for m in metricas if m["idx"] != idx_c1], key=lambda x: -x["num_gt"])[0]["idx"]
 
     # Caso 3: Cromatina Heterogênea / Donut (tamanho médio com super-segmentação num_pred > num_gt)
     cand_c3 = [m for m in metricas if m["idx"] not in [idx_c1, idx_c2] and 15.0 <= m["mean_diam"] <= 30.0 and m["num_pred"] > m["num_gt"]]
+    if not cand_c3:
+        cand_c3 = [m for m in metricas if m["idx"] not in [idx_c1, idx_c2] and m["num_pred"] > m["num_gt"]]
     idx_c3 = sorted(cand_c3, key=lambda x: x["ap50"])[0]["idx"] if cand_c3 else \
              sorted([m for m in metricas if m["idx"] not in [idx_c1, idx_c2]], key=lambda x: x["ap50"])[0]["idx"]
 
     # Caso 4: Baixo Contraste e Ruído de Fundo (falsos positivos em regiões sem células ou menor AP)
     cand_c4 = [m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3] and m["num_gt"] <= 25 and m["ap50"] < 0.4]
+    if not cand_c4:
+        cand_c4 = [m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3] and m["num_gt"] <= 30]
     idx_c4 = sorted(cand_c4, key=lambda x: x["ap50"])[0]["idx"] if cand_c4 else \
              sorted([m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3]], key=lambda x: x["ap50"])[0]["idx"]
 
     # Caso 5: Objeto Fatiado na Margem Externa (alta incidência de núcleos tocando a moldura da imagem)
     cand_c5 = [m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3, idx_c4] and m["num_borda"] >= 4]
+    if not cand_c5:
+        cand_c5 = [m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3, idx_c4] and m["num_borda"] >= 1]
     idx_c5 = sorted(cand_c5, key=lambda x: x["ap50"])[0]["idx"] if cand_c5 else \
-             sorted([m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3, idx_c4]], key=lambda x: x["ap50"])[0]["idx"]
+             sorted([m for m in metricas if m["idx"] not in [idx_c1, idx_c2, idx_c3, idx_c4]], key=lambda x: -x["num_borda"])[0]["idx"]
 
     diagnosticos = [
         (

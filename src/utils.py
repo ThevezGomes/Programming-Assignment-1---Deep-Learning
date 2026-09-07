@@ -43,6 +43,13 @@ try:
         plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
         plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
     )
+    from .stress import (
+        filtrar_por_modalidade, treinar_modelo_modalidade,
+        avaliar_teste_estresse_modalidade, imprimir_tabela_estresse_modalidade,
+        plot_comparacao_estresse_modalidade, normalizar_cor_polaridade,
+        treinar_modelo_estresse_com_augmentation, avaliar_comparacao_correcoes,
+        imprimir_tabela_correcoes_estresse, plot_comparacao_correcoes_estresse
+    )
 except ImportError:
     from models import create_segmentation_head, DecoderBlock, UNetResNet, SegNet
     from losses import FocalLossMultiClass
@@ -75,4 +82,12 @@ except ImportError:
         plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
         plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
     )
+    from stress import (
+        filtrar_por_modalidade, treinar_modelo_modalidade,
+        avaliar_teste_estresse_modalidade, imprimir_tabela_estresse_modalidade,
+        plot_comparacao_estresse_modalidade, normalizar_cor_polaridade,
+        treinar_modelo_estresse_com_augmentation, avaliar_comparacao_correcoes,
+        imprimir_tabela_correcoes_estresse, plot_comparacao_correcoes_estresse
+    )
+
 
