@@ -85,12 +85,36 @@ def carregar_dataset_real(stage1_dir, target_size=(128, 128)):
 
         orig_unique = set(range(1, len(mask_paths) + 1))
         resized_unique = set(np.unique(mask_resized)) - {0}
+        lost_ids = orig_unique - resized_unique
 
+        if lost_ids:
+            scale_y = target_size[1] / inst_mask.shape[0]
+            scale_x = target_size[0] / inst_mask.shape[1]
+            for lid in lost_ids:
+                ys, xs = np.where(inst_mask == lid)
+                if len(ys) > 0:
+                    cy = int(np.clip(np.round(ys.mean() * scale_y), 0, target_size[1] - 1))
+                    cx = int(np.clip(np.round(xs.mean() * scale_x), 0, target_size[0] - 1))
+                    placed = False
+                    for dy in [0, -1, 1, -2, 2]:
+                        for dx in [0, -1, 1, -2, 2]:
+                            ny, nx = cy + dy, cx + dx
+                            if 0 <= ny < target_size[1] and 0 <= nx < target_size[0]:
+                                if mask_resized[ny, nx] == 0:
+                                    mask_resized[ny, nx] = lid
+                                    placed = True
+                                    break
+                        if placed:
+                            break
+                    if not placed:
+                        mask_resized[cy, cx] = lid
+
+        final_unique = set(np.unique(mask_resized)) - {0}
         total_labels_count += len(orig_unique)
-        lost_labels_count += (len(orig_unique) - len(resized_unique))
+        lost_labels_count += (len(orig_unique) - len(final_unique))
 
         relabeled_mask = np.zeros_like(mask_resized, dtype=np.int32)
-        for new_id, old_id in enumerate(sorted(resized_unique), start=1):
+        for new_id, old_id in enumerate(sorted(final_unique), start=1):
             relabeled_mask[mask_resized == old_id] = new_id
 
         images.append(img_resized)
