@@ -38,7 +38,13 @@ def evaluate_model(model, X, y, device, threshold=0.5, batch_size=8):
 
             img_tensor = torch.from_numpy(batch_img).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
             outputs = model(img_tensor)
-            preds = (torch.sigmoid(outputs) > threshold).cpu().numpy().squeeze(1)
+
+            # Detecta automaticamente se é modelo binário (1 canal) ou multi-classe (3 canais)
+            if outputs.shape[1] == 1:
+                preds = (torch.sigmoid(outputs) > threshold).cpu().numpy().squeeze(1)
+            else:
+                # Multi-classe (Trilha A): foreground = interior (1) + fronteira (2)
+                preds = (torch.argmax(outputs, dim=1) > 0).cpu().numpy()
 
             for i in range(len(batch_img)):
                 y_t = (batch_mask[i] > 0).astype(np.float32)
@@ -116,7 +122,17 @@ def match_instances_hungarian(iou_matrix, iou_thresh):
 
 
 def evaluate_instance_metrics_single(pred_prob, mask_gt, threshold=0.5, iou_thresholds=np.arange(0.50, 1.00, 0.05), matching_method="greedy"):
-    """Avalia uma única imagem em nível de instâncias calculando mAP@[.50:.95] e erro de contagem."""
+    """
+    Avalia uma única imagem em nível de instâncias calculando mAP@[.50:.95] e erro de contagem.
+    
+    Nota sobre a métrica AP:
+        Utilizamos AP = TP / (TP + FP + FN), que é o Índice Jaccard Agregado 
+        (Aggregated Jaccard Index), a métrica oficial da competição DSB2018.
+        Esta formulação é equivalente a IoU de conjuntos e difere da AP clássica
+        baseada em curva Precision-Recall (que exige um score de confiança por instância).
+        Como as instâncias são extraídas por componentes conexos/watershed sem ranking,
+        não há score de confiança, o que torna o Jaccard Agregado a escolha padrão.
+    """
     pred_labeled, num_pred = extract_instances_naive(pred_prob, threshold=threshold)
 
     gt_labeled = mask_gt.astype(np.int32)
@@ -240,7 +256,12 @@ def evaluate_instance_metrics_single_trilha_a(pred_probs, mask_gt_instances,
                                              min_marker_size=1,
                                              iou_thresholds=np.arange(0.50, 1.00, 0.05),
                                              matching_method="hungarian"):
-    """Avalia uma única imagem da Trilha A calculando mAP@[.50:.95] e erro de contagem via Watershed."""
+    """
+    Avalia uma única imagem da Trilha A calculando mAP@[.50:.95] e erro de contagem via Watershed.
+    
+    A métrica AP segue a formulação do Índice Jaccard Agregado: AP = TP / (TP + FP + FN).
+    Ver docstring de evaluate_instance_metrics_single para justificativa.
+    """
     pred_labeled, num_pred = decodificar_watershed_trilha_a(
         pred_probs, threshold_interior=threshold_interior, threshold_fg=threshold_fg, min_marker_size=min_marker_size
     )

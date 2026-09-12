@@ -259,7 +259,7 @@ def carregar_checkpoint(filepath="checkpoints/checkpoint.pt", device=None):
         else:
             device = torch.device("cpu")
             
-    checkpoint = torch.load(resolved_path, map_location=device)
+    checkpoint = torch.load(resolved_path, map_location=device, weights_only=True)
     
     out_channels = 3
     head_type = "conv1x1"
