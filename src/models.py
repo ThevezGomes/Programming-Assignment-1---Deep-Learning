@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -190,3 +191,101 @@ class SegNet(nn.Module):
         d2 = self.dec2(self.unpool2(d3, ind2))
         d1 = self.dec1(self.unpool1(d2, ind1))
         return d1
+
+
+def _resolve_checkpoint_path(filepath):
+    """Garante a resolução correta do caminho caso o comando seja executado da raiz ou de src/."""
+    if os.path.isabs(filepath):
+        return filepath
+    if os.path.basename(os.getcwd()) == "src" and not filepath.startswith(".."):
+        return os.path.join("..", filepath)
+    return filepath
+
+
+def salvar_checkpoint(model, filepath="checkpoints/checkpoint.pt", **kwargs):
+    """
+    Salva os pesos e metadados do modelo treinado em formato de checkpoint PyTorch (.pt).
+    Cria automaticamente o diretório se necessário.
+    
+    Parâmetros:
+      - model: Instância do modelo PyTorch (ex.: UNetResNet treinado na Trilha A)
+      - filepath: Caminho relativo ou absoluto onde o checkpoint será salvo.
+      - **kwargs: Metadados adicionais opcionais (ex: epoch, loss, class_weights, thresholds).
+    """
+    resolved_path = _resolve_checkpoint_path(filepath)
+    os.makedirs(os.path.dirname(resolved_path), exist_ok=True)
+    
+    checkpoint = {
+        'model_state_dict': model.state_dict(),
+        'architecture': 'UNetResNet',
+        'backbone': 'resnet18',
+        'out_channels': 3,
+        'head_type': 'conv1x1',
+        'threshold_interior': 0.35,
+        'threshold_fg': 0.35,
+    }
+    checkpoint.update(kwargs)
+    
+    torch.save(checkpoint, resolved_path)
+    size_mb = os.path.getsize(resolved_path) / (1024 * 1024)
+    print(f"Checkpoint salvo com sucesso em: {resolved_path} ({size_mb:.2f} MB)")
+    return resolved_path
+
+
+def carregar_checkpoint(filepath="checkpoints/checkpoint.pt", device=None):
+    """
+    Carrega o modelo final com os pesos salvos no checkpoint pronto para inferência (eval mode).
+    
+    Parâmetros:
+      - filepath: Caminho para o arquivo .pt
+      - device: Dispositivo onde alocar o modelo (cuda, mps ou cpu). Se None, detecta automaticamente.
+      
+    Retorna:
+      - model: Instância de UNetResNet carregada com os pesos e em modo eval().
+    """
+    resolved_path = _resolve_checkpoint_path(filepath)
+    if not os.path.exists(resolved_path):
+        # Tenta no caminho alternativo relativo (ex.: se executado de diretório diferente)
+        if os.path.exists(filepath):
+            resolved_path = filepath
+        else:
+            raise FileNotFoundError(f"Arquivo de checkpoint não encontrado: {resolved_path} nem {filepath}")
+    
+    if device is None:
+        if torch.cuda.is_available():
+            device = torch.device("cuda")
+        elif torch.backends.mps.is_available() and torch.backends.mps.is_built():
+            device = torch.device("mps")
+        else:
+            device = torch.device("cpu")
+            
+    checkpoint = torch.load(resolved_path, map_location=device)
+    
+    out_channels = 3
+    head_type = "conv1x1"
+    if isinstance(checkpoint, dict):
+        out_channels = checkpoint.get('out_channels', 3)
+        head_type = checkpoint.get('head_type', 'conv1x1')
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+    else:
+        state_dict = checkpoint
+        
+    head = create_segmentation_head(in_channels=32, out_channels=out_channels, head_type=head_type)
+    model = UNetResNet(head=head, pretrained=False, freeze_backbone=False)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    
+    print(f"Modelo carregado com sucesso a partir de '{resolved_path}' no dispositivo: {device}")
+    return model
+
+
+def criar_unet_res18(out_channels=3, pretrained=True, freeze_backbone=False, head_type="conv1x1"):
+    """Fábrica modular para instanciar a U-Net ResNet18."""
+    h = create_segmentation_head(in_channels=32, out_channels=out_channels, head_type=head_type)
+    return UNetResNet(head=h, pretrained=pretrained, freeze_backbone=freeze_backbone)
+
+
+def criar_segnet(out_channels=3):
+    """Fábrica modular para instanciar a SegNet."""
+    return SegNet(out_channels=out_channels)

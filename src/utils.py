@@ -12,9 +12,13 @@ def get_device():
 
 # Reexportação de todos os módulos especializados para compatibilidade retroativa total (Facade)
 try:
-    from .models import create_segmentation_head, DecoderBlock, UNetResNet, SegNet
+    from .models import (
+        create_segmentation_head, DecoderBlock, UNetResNet, SegNet,
+        salvar_checkpoint, carregar_checkpoint, criar_unet_res18, criar_segnet
+    )
+    from .inference import inferir, carregar_modelo_inferencia
     from .losses import FocalLossMultiClass
-    from .postprocessing import extract_instances_naive, decodificar_watershed_trilha_a
+    from .postprocessing import extract_instances_naive, decodificar_watershed_trilha_a, colorir_mascara_instancias, inferir_imagem
     from .data import (
         generate_ellipse, gerar_dataset_elipses, carregar_dataset_real,
         identificar_modalidades, split_dataset, gerar_alvos_trilha_a, calcular_pesos_classes_trilha_a
@@ -51,9 +55,13 @@ try:
         imprimir_tabela_correcoes_estresse, plot_comparacao_correcoes_estresse
     )
 except ImportError:
-    from models import create_segmentation_head, DecoderBlock, UNetResNet, SegNet
+    from models import (
+        create_segmentation_head, DecoderBlock, UNetResNet, SegNet,
+        salvar_checkpoint, carregar_checkpoint, criar_unet_res18, criar_segnet
+    )
+    from inference import inferir, carregar_modelo_inferencia
     from losses import FocalLossMultiClass
-    from postprocessing import extract_instances_naive, decodificar_watershed_trilha_a
+    from postprocessing import extract_instances_naive, decodificar_watershed_trilha_a, colorir_mascara_instancias, inferir_imagem
     from data import (
         generate_ellipse, gerar_dataset_elipses, carregar_dataset_real,
         identificar_modalidades, split_dataset, gerar_alvos_trilha_a, calcular_pesos_classes_trilha_a
