@@ -20,7 +20,7 @@ try:
     from .losses import FocalLossMultiClass
     from .postprocessing import extract_instances_naive, decodificar_watershed_trilha_a, colorir_mascara_instancias, inferir_imagem
     from .data import (
-        generate_ellipse, gerar_dataset_elipses, carregar_dataset_real,
+        gerar_dataset_elipses, carregar_dataset_real,
         identificar_modalidades, split_dataset, gerar_alvos_trilha_a, calcular_pesos_classes_trilha_a
     )
     from .metrics import (
@@ -50,9 +50,7 @@ try:
     from .stress import (
         filtrar_por_modalidade, treinar_modelo_modalidade,
         avaliar_teste_estresse_modalidade, imprimir_tabela_estresse_modalidade,
-        plot_comparacao_estresse_modalidade, normalizar_cor_polaridade,
-        treinar_modelo_estresse_com_augmentation, avaliar_comparacao_correcoes,
-        imprimir_tabela_correcoes_estresse, plot_comparacao_correcoes_estresse
+        plot_comparacao_estresse_modalidade
     )
 except ImportError:
     from models import (
@@ -63,7 +61,7 @@ except ImportError:
     from losses import FocalLossMultiClass
     from postprocessing import extract_instances_naive, decodificar_watershed_trilha_a, colorir_mascara_instancias, inferir_imagem
     from data import (
-        generate_ellipse, gerar_dataset_elipses, carregar_dataset_real,
+        gerar_dataset_elipses, carregar_dataset_real,
         identificar_modalidades, split_dataset, gerar_alvos_trilha_a, calcular_pesos_classes_trilha_a
     )
     from metrics import (
@@ -93,9 +91,7 @@ except ImportError:
     from stress import (
         filtrar_por_modalidade, treinar_modelo_modalidade,
         avaliar_teste_estresse_modalidade, imprimir_tabela_estresse_modalidade,
-        plot_comparacao_estresse_modalidade, normalizar_cor_polaridade,
-        treinar_modelo_estresse_com_augmentation, avaliar_comparacao_correcoes,
-        imprimir_tabela_correcoes_estresse, plot_comparacao_correcoes_estresse
+        plot_comparacao_estresse_modalidade
     )
 
 

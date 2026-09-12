@@ -1,24 +1,23 @@
 import os
 import glob
-import time
 import numpy as np
 import cv2
 import torch
-
-
-def generate_ellipse(image, center, axes, angle, color=None, thickness=-1):
-    """Desenha uma elipse na imagem com cor ou rótulo especificado."""
-    if color is None:
-        color = (
-            int(np.random.randint(0, 256)),
-            int(np.random.randint(0, 256)),
-            int(np.random.randint(0, 256)),
-        )
-    return cv2.ellipse(image, center, axes, angle, 0, 360, color, thickness)
-
+from collections import Counter
 
 def gerar_dataset_elipses(num_images=100, image_size=(128, 128), num_ellipses_range=(5, 20), seed=42):
-    """Gera dataset sintético de elipses com ruído, variação de contraste e máscaras de instâncias (Parte 0)."""
+    """
+    Gera um dataset com imagens de elipses (Parte 0).
+
+    Args:
+        num_images (int, optional): Número de imagens a serem geradas. Defaults to 100.
+        image_size (tuple, optional): Dimensões das imagens geradas. Defaults to (128, 128).
+        num_ellipses_range (tuple, optional): Faixa de número de elipses por imagem. Defaults to (5, 20).
+        seed (int, optional): Semente para geração de números aleatórios. Defaults to 42.
+
+    Returns:
+        tuple: Tupla contendo as imagens e máscaras de instância geradas.
+    """
     np.random.seed(seed)
     images = []
     instance_masks = []
@@ -60,8 +59,6 @@ def carregar_dataset_real(stage1_dir, target_size=(128, 128)):
     images = []
     instance_masks = []
 
-    print(f"Carregando {len(image_ids)} amostras de '{stage1_dir}'...")
-    t0 = time.time()
     lost_labels_count = 0
     total_labels_count = 0
 
@@ -120,10 +117,6 @@ def carregar_dataset_real(stage1_dir, target_size=(128, 128)):
         images.append(img_resized)
         instance_masks.append(relabeled_mask)
 
-    t1 = time.time()
-    if lost_labels_count > 0:
-        print(f"Aviso: {lost_labels_count}/{total_labels_count} rótulos de instâncias foram perdidos no resize.")
-    print(f"Dataset real carregado em {t1 - t0:.2f} segundos!")
     return np.array(images), np.array(instance_masks)
 
 
@@ -150,8 +143,18 @@ def identificar_modalidades(images):
 
 def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42, stratify=True):
     """
-    Divide um conjunto de dados em treino, validação e teste com estratificação por modalidade
-    conforme exigido no enunciado do PA1 (Seção 2: Dados).
+    Separa o dataset em treino, validação e teste.
+
+    Args:
+        images (_type_): Dataset de imagens.
+        masks (_type_): _description_
+        train_ratio (float, optional): _description_. Defaults to 0.70.
+        val_ratio (float, optional): _description_. Defaults to 0.15.
+        seed (int, optional): _description_. Defaults to 42.
+        stratify (bool, optional): _description_. Defaults to True.
+
+    Returns:
+        _type_: _description_
     """
     num_samples = len(images)
     np.random.seed(seed)
@@ -184,7 +187,6 @@ def split_dataset(images, masks, train_ratio=0.70, val_ratio=0.15, seed=42, stra
         np.random.shuffle(val_idx)
         np.random.shuffle(test_idx)
 
-        from collections import Counter
         print(f"Split estratificado por modalidade (Total: {num_samples}):")
         print(f"  Treino ({len(train_idx)}): {dict(Counter(mods[train_idx]))}")
         print(f"  Validação ({len(val_idx)}): {dict(Counter(mods[val_idx]))}")

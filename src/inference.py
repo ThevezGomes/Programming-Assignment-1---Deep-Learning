@@ -4,18 +4,14 @@ Recebe o caminho de uma imagem qualquer, devolve a máscara de instâncias color
 Roda sem retreinar carregando os pesos do checkpoint.
 """
 
-import os
-import cv2
-import torch
-import numpy as np
 import matplotlib.pyplot as plt
 
 try:
     from .models import carregar_checkpoint
-    from .postprocessing import inferir_imagem, colorir_mascara_instancias, decodificar_watershed_trilha_a
+    from .postprocessing import inferir_imagem
 except ImportError:
     from models import carregar_checkpoint
-    from postprocessing import inferir_imagem, colorir_mascara_instancias, decodificar_watershed_trilha_a
+    from postprocessing import inferir_imagem
 
 
 def carregar_modelo_inferencia(caminho_checkpoint="checkpoints/checkpoint.pt", device=None):

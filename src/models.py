@@ -7,15 +7,6 @@ from torchvision.models import ResNet18_Weights
 
 
 def create_segmentation_head(in_channels=32, out_channels=1, head_type="conv1x1", dropout=0.0):
-    """
-    Função modular para construção da cabeça (head) de predição da U-Net.
-    
-    Parâmetros:
-      - in_channels: Número de canais de entrada provenientes do último DecoderBlock (padrão 32).
-      - out_channels: Número de canais de saída (1 para binário, 3 para Trilha A: Fundo/Interior/Fronteira).
-      - head_type: 'conv1x1' (padrão) ou 'conv3x3' com BatchNorm e ReLU.
-      - dropout: Taxa de dropout opcional (padrão 0.0).
-    """
     if head_type == "conv1x1":
         if dropout > 0:
             return nn.Sequential(
@@ -67,6 +58,7 @@ class UNetResNet(nn.Module):
                 param.requires_grad = False
 
         self.backbone = backbone
+        # Camada para não passar a imagem "crua" diretamente para o decoder
         self.stem_skip = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
             nn.BatchNorm2d(32),
@@ -119,7 +111,6 @@ class UNetResNet(nn.Module):
 
 
 class SegNet(nn.Module):
-    """Modelo SegNet com recuperação de resolução por Max Unpooling e índices salvos no pooling (slides 14 e 16)."""
     def __init__(self, out_channels=3):
         super().__init__()
         self.enc1 = nn.Sequential(

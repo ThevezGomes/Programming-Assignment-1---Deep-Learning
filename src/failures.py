@@ -10,10 +10,10 @@ except ImportError:
     watershed = None
 
 try:
-    from .metrics import evaluate_instance_metrics_single_trilha_a, calculate_instance_iou_matrix, match_instances_hungarian
+    from .metrics import calculate_instance_iou_matrix, match_instances_hungarian
     from .postprocessing import decodificar_watershed_trilha_a
 except ImportError:
-    from metrics import evaluate_instance_metrics_single_trilha_a, calculate_instance_iou_matrix, match_instances_hungarian
+    from metrics import calculate_instance_iou_matrix, match_instances_hungarian
     from postprocessing import decodificar_watershed_trilha_a
 
 
