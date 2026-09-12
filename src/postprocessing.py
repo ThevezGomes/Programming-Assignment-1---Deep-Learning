@@ -30,7 +30,7 @@ def decodificar_watershed_trilha_a(pred_probs, threshold_interior=0.35, threshol
     else:
         raise ValueError("pred_probs deve conter 3 canais de probabilidades.")
 
-    # 1. Marcadores a partir da probabilidade de interior sem atenuação de blur
+    # 1. Marcadores a partir da probabilidade de interior
     interior_binary = (p_interior > threshold_interior)
     markers, num_markers = label(interior_binary)
 

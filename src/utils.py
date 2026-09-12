@@ -27,7 +27,7 @@ try:
         evaluate_model_instances_trilha_a, evaluate_instance_level_trilha_a,
         compare_baseline_vs_trilha_a, imprimir_tabela_ablação
     )
-    from .training import train_model, train_model_trilha_a, rodar_ablação_seeds
+    from .training import train_model, train_model_trilha_a, train_model_trilha_a_twophase, rodar_ablação_seeds
     from .mosaic import (
         DisjointSetUnion, criar_mosaico_imagens, inferencia_mosaico_tiles,
         fundir_instancias_tiles, avaliar_e_comparar_mosaico
@@ -66,7 +66,7 @@ except ImportError:
         evaluate_model_instances_trilha_a, evaluate_instance_level_trilha_a,
         compare_baseline_vs_trilha_a, imprimir_tabela_ablação
     )
-    from training import train_model, train_model_trilha_a, rodar_ablação_seeds
+    from training import train_model, train_model_trilha_a, train_model_trilha_a_twophase, rodar_ablação_seeds
     from mosaic import (
         DisjointSetUnion, criar_mosaico_imagens, inferencia_mosaico_tiles,
         fundir_instancias_tiles, avaliar_e_comparar_mosaico

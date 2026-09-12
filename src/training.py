@@ -114,6 +114,105 @@ def train_model_trilha_a(model, X_train, y_train_3c, X_val, y_val_3c, device,
         print(f'Epoch [{epoch + 1:2d}/{num_epochs:2d}] | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}')
 
 
+def train_model_trilha_a_twophase(model, X_train, y_train_3c, X_val, y_val_3c, device,
+                                   class_weights=None, gamma=0.0,
+                                   epochs_phase1=5, epochs_phase2=10,
+                                   batch_size=16,
+                                   lr_phase1=0.001, lr_phase2=0.0001):
+    """Treina a U-Net em 2 fases para evitar degradação catastrófica do backbone pré-treinado.
+
+    Fase 1 (backbone congelado):
+        O ResNet18 fica congelado; apenas o decoder e o head aprendem a tarefa de 3 classes.
+        Usa LR maior pois só os pesos aleatórios/novos são atualizados.
+
+    Fase 2 (fine-tuning completo):
+        Descongela todo o backbone com LR muito menor para ajuste fino sem destruir as
+        representações pré-treinadas.
+    """
+    model.to(device)
+    criterion = FocalLossMultiClass(weight=class_weights, gamma=gamma)
+
+    # ── Fase 1: backbone congelado ──────────────────────────────────────────
+    print(f"\n[Fase 1] Backbone CONGELADO | {epochs_phase1} épocas | LR={lr_phase1}")
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+
+    optimizer = torch.optim.Adam(
+        filter(lambda p: p.requires_grad, model.parameters()),
+        lr=lr_phase1
+    )
+
+    num_train = X_train.shape[0]
+    num_val   = X_val.shape[0]
+
+    for epoch in range(epochs_phase1):
+        model.train()
+        train_loss = 0.0
+        train_batches = int(np.ceil(num_train / batch_size))
+
+        for i in range(train_batches):
+            batch_images = X_train[i * batch_size:(i + 1) * batch_size]
+            batch_masks  = y_train_3c[i * batch_size:(i + 1) * batch_size]
+
+            imgs   = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+            labels = torch.from_numpy(batch_masks).long().contiguous().to(device)
+
+            optimizer.zero_grad()
+            loss = criterion(model(imgs), labels)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * len(batch_images)
+
+        train_loss /= num_train
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for i in range(int(np.ceil(num_val / batch_size))):
+                imgs   = torch.from_numpy(X_val[i * batch_size:(i + 1) * batch_size]).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+                labels = torch.from_numpy(y_val_3c[i * batch_size:(i + 1) * batch_size]).long().contiguous().to(device)
+                val_loss += criterion(model(imgs), labels).item() * len(X_val[i * batch_size:(i + 1) * batch_size])
+        val_loss /= num_val
+        print(f'  Epoch [{epoch + 1:2d}/{epochs_phase1:2d}] | Train: {train_loss:.4f} | Val: {val_loss:.4f}')
+
+    # ── Fase 2: fine-tuning completo ────────────────────────────────────────
+    print(f"\n[Fase 2] Backbone DESCONGELADO (fine-tuning) | {epochs_phase2} épocas | LR={lr_phase2}")
+    for param in model.backbone.parameters():
+        param.requires_grad = True
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr_phase2)
+
+    for epoch in range(epochs_phase2):
+        model.train()
+        train_loss = 0.0
+        train_batches = int(np.ceil(num_train / batch_size))
+
+        for i in range(train_batches):
+            batch_images = X_train[i * batch_size:(i + 1) * batch_size]
+            batch_masks  = y_train_3c[i * batch_size:(i + 1) * batch_size]
+
+            imgs   = torch.from_numpy(batch_images).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+            labels = torch.from_numpy(batch_masks).long().contiguous().to(device)
+
+            optimizer.zero_grad()
+            loss = criterion(model(imgs), labels)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item() * len(batch_images)
+
+        train_loss /= num_train
+
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for i in range(int(np.ceil(num_val / batch_size))):
+                imgs   = torch.from_numpy(X_val[i * batch_size:(i + 1) * batch_size]).float().permute(0, 3, 1, 2).contiguous().to(device) / 255.0
+                labels = torch.from_numpy(y_val_3c[i * batch_size:(i + 1) * batch_size]).long().contiguous().to(device)
+                val_loss += criterion(model(imgs), labels).item() * len(X_val[i * batch_size:(i + 1) * batch_size])
+        val_loss /= num_val
+        print(f'  Epoch [{epoch + 1:2d}/{epochs_phase2:2d}] | Train: {train_loss:.4f} | Val: {val_loss:.4f}')
+
+
 def rodar_ablação_seeds(modelo_fn, X_train, y_train_3c, X_val, y_val_3c, X_test, y_test_gt,
                         device, seeds=(42, 123), class_weights=None, gamma=0.0,
                         num_epochs=12, batch_size=16, learning_rate=0.0005,
