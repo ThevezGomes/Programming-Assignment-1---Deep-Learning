@@ -4,10 +4,14 @@ import torch.nn as nn
 
 try:
     from .losses import FocalLossMultiClass
-    from .metrics import evaluate_model_instances_trilha_a
+    from .metrics import evaluate_model_instances_trilha_a, evaluate_instance_level, evaluate_instance_level_trilha_a
+    from .data import gerar_alvos_trilha_a, calcular_pesos_classes_trilha_a
+    from .models import criar_unet_res18
 except ImportError:
     from losses import FocalLossMultiClass
-    from metrics import evaluate_model_instances_trilha_a
+    from metrics import evaluate_model_instances_trilha_a, evaluate_instance_level, evaluate_instance_level_trilha_a
+    from data import gerar_alvos_trilha_a, calcular_pesos_classes_trilha_a
+    from models import criar_unet_res18
 
 
 def train_model(model, X_train, y_train, X_val, y_val, device, num_epochs=10, batch_size=8, learning_rate=0.001):
@@ -250,3 +254,67 @@ def rodar_ablação_seeds(modelo_fn, X_train, y_train_3c, X_val, y_val_3c, X_tes
         "maps_raw": maps,
         "erros_raw": erros,
     }
+
+
+def treinar_e_avaliar_sintetico_baseline(
+    X_train, y_train, X_val, y_val, X_test, y_test, device,
+    model=None, num_epochs=10, batch_size=8, learning_rate=0.001,
+    threshold=0.5, matching_method="hungarian"
+):
+    """
+    Parte 1: Treina (ou reutiliza se já fornecido) e avalia o modelo U-Net binário baseline no dataset sintético (In-Domain).
+    Retorna (model, results_dict).
+    """
+    if model is None:
+        print(f"\n--> Treinando modelo U-Net Baseline nos dados Sintéticos ({num_epochs} épocas)...")
+        model = criar_unet_res18(out_channels=1, pretrained=True, freeze_backbone=True)
+        train_model(
+            model, X_train, y_train, X_val, y_val, device,
+            num_epochs=num_epochs, batch_size=batch_size, learning_rate=learning_rate
+        )
+
+    print("\n--> Avaliando modelo Baseline no Teste Sintético (In-Domain)...")
+    res = evaluate_instance_level(
+        model, X_test, y_test, device=device,
+        threshold=threshold, matching_method=matching_method,
+        dataset_name="Sintéticos (Elipses - In-Domain)"
+    )
+
+    return model, res
+
+
+def treinar_e_avaliar_sintetico_trilha_a(
+    X_train, y_train, X_val, y_val, X_test, y_test, device,
+    model=None, border_thickness=1, gamma=1.0, num_epochs=10,
+    batch_size=16, learning_rate=0.0005,
+    threshold_interior=0.35, threshold_fg=0.35, matching_method="hungarian"
+):
+    """
+    Parte 2: Gera alvos de 3 classes para elipses sintéticas, treina (ou reutiliza) a U-Net Trilha A
+    e avalia via Watershed com Algoritmo Húngaro (In-Domain).
+    Retorna (model, results_dict).
+    """
+    if model is None:
+        print("\n--> Gerando alvos de 3 classes para as Elipses Sintéticas...")
+        y_train_3c = gerar_alvos_trilha_a(y_train, border_thickness=border_thickness)
+        y_val_3c = gerar_alvos_trilha_a(y_val, border_thickness=border_thickness)
+        weights = calcular_pesos_classes_trilha_a(y_train_3c)
+
+        print(f"--> Treinando U-Net Trilha A nos dados Sintéticos ({num_epochs} épocas)...")
+        model = criar_unet_res18(out_channels=3, pretrained=True, freeze_backbone=True)
+        train_model_trilha_a(
+            model, X_train, y_train_3c, X_val, y_val_3c, device,
+            class_weights=weights, gamma=gamma, num_epochs=num_epochs,
+            batch_size=batch_size, learning_rate=learning_rate
+        )
+
+    print("\n--> Avaliando U-Net Trilha A no Teste Sintético (In-Domain)...")
+    res = evaluate_instance_level_trilha_a(
+        model, X_test, y_test, device=device,
+        threshold_interior=threshold_interior, threshold_fg=threshold_fg,
+        matching_method=matching_method,
+        dataset_name="Sintéticos (Trilha A - In-Domain)"
+    )
+
+    return model, res
+

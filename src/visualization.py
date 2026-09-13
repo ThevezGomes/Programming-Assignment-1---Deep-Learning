@@ -3,10 +3,16 @@ import matplotlib.pyplot as plt
 import torch
 
 try:
-    from .metrics import calculate_dice_coefficient, calculate_iou
+    from .metrics import (
+        calculate_dice_coefficient, calculate_iou,
+        evaluate_instance_level, evaluate_instance_level_trilha_a
+    )
     from .postprocessing import extract_instances_naive, decodificar_watershed_trilha_a
 except ImportError:
-    from metrics import calculate_dice_coefficient, calculate_iou
+    from metrics import (
+        calculate_dice_coefficient, calculate_iou,
+        evaluate_instance_level, evaluate_instance_level_trilha_a
+    )
     from postprocessing import extract_instances_naive, decodificar_watershed_trilha_a
 
 
@@ -368,3 +374,157 @@ def plot_mosaico_completo(mosaic_img, mosaic_gt, pred_sem_fusao, pred_com_fusao)
 
     plt.tight_layout()
     plt.show()
+
+
+def avaliar_e_plotar_comparativo_instancias(
+    res_real,
+    res_synth=None,
+    model_synth=None,
+    X_synth=None,
+    y_synth=None,
+    device=None,
+    is_trilha_a=False,
+    threshold_interior=0.35,
+    threshold_fg=0.35,
+    threshold_baseline=0.5,
+    matching_method="hungarian",
+    titulo_metodo="Avaliação por Instâncias",
+    nome_real="Reais (DSB2018)",
+    nome_synth="Sintéticos (Elipses)"
+):
+    """
+    Avalia o modelo no dataset sintético (se não pré-computado) e gera:
+    1) Tabela quantitativa comparativa formatada das métricas no console (Reais vs. Sintéticos).
+    2) Painel com dois histogramas comparativos do Erro Absoluto de Contagem por Imagem (|N_pred - N_gt|).
+
+    Pode ser reutilizada tanto para a Baseline (Parte 1) quanto para a Trilha A (Parte 2).
+    """
+    # 1. Se res_synth não foi fornecido pronto, computa usando o avaliador adequado
+    if res_synth is None:
+        if model_synth is None or X_synth is None or y_synth is None or device is None:
+            raise ValueError(
+                "Para avaliar o dataset sintético, forneça 'res_synth' ou ('model_synth', 'X_synth', 'y_synth', 'device')."
+            )
+
+        if is_trilha_a:
+            res_synth = evaluate_instance_level_trilha_a(
+                model=model_synth,
+                X=X_synth,
+                y=y_synth,
+                device=device,
+                threshold_interior=threshold_interior,
+                threshold_fg=threshold_fg,
+                matching_method=matching_method,
+                dataset_name=nome_synth
+            )
+        else:
+            res_synth = evaluate_instance_level(
+                model=model_synth,
+                X=X_synth,
+                y=y_synth,
+                device=device,
+                threshold=threshold_baseline,
+                matching_method=matching_method,
+                dataset_name=nome_synth
+            )
+
+    # 2. Exibe tabela comparativa no console
+    print(f"\n{'='*75}")
+    print(f"   COMPARAÇÃO QUANTITATIVA: REAIS vs. SINTÉTICOS")
+    print(f"   Configuração: {titulo_metodo}")
+    print(f"{'='*75}")
+    print(f"{'Métrica':<35} | {nome_real:<18} | {nome_synth:<18}")
+    print(f"{'-'*75}")
+    print(f"{'mAP@[.50:.95]':<35} | {res_real['mean_mAP']:<18.4f} | {res_synth['mean_mAP']:<18.4f}")
+    print(f"{'Erro Médio Contagem (abs)':<35} | {res_real['mean_count_error']:<18.2f} | {res_synth['mean_count_error']:<18.2f}")
+
+    if 'mean_aps_per_threshold' in res_real and 'mean_aps_per_threshold' in res_synth:
+        ap50_r = res_real['mean_aps_per_threshold'][0]
+        ap50_s = res_synth['mean_aps_per_threshold'][0]
+        print(f"{'AP @ IoU=0.50':<35} | {ap50_r:<18.4f} | {ap50_s:<18.4f}")
+        if len(res_real['mean_aps_per_threshold']) > 5:
+            ap75_r = res_real['mean_aps_per_threshold'][5]
+            ap75_s = res_synth['mean_aps_per_threshold'][5]
+            print(f"{'AP @ IoU=0.75':<35} | {ap75_r:<18.4f} | {ap75_s:<18.4f}")
+
+    print(f"{'='*75}\n")
+
+    # 3. Histograma Comparativo do Erro Absoluto de Contagem
+    errors_real = res_real["count_error_list"]
+    errors_synth = res_synth["count_error_list"]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+    # --- Subplot 1: Dataset Real ---
+    max_r = int(np.max(errors_real)) if len(errors_real) > 0 else 10
+    bins_r = np.arange(0, max_r + 2) - 0.5
+    axes[0].hist(
+        errors_real,
+        bins=bins_r,
+        color="royalblue",
+        edgecolor="black",
+        alpha=0.8,
+        rwidth=0.85
+    )
+    axes[0].axvline(
+        res_real["mean_count_error"],
+        color="crimson",
+        linestyle="--",
+        linewidth=2,
+        label=f'Média = {res_real["mean_count_error"]:.2f}'
+    )
+    axes[0].axvline(
+        np.median(errors_real),
+        color="darkgreen",
+        linestyle=":",
+        linewidth=2,
+        label=f'Mediana = {np.median(errors_real):.1f}'
+    )
+    axes[0].set_title(
+        f"Erro de Contagem — {nome_real}\n({titulo_metodo})",
+        fontsize=12,
+        fontweight="bold"
+    )
+    axes[0].set_xlabel("Erro Absoluto (|N_pred - N_gt|)", fontsize=11)
+    axes[0].set_ylabel("Frequência (Nº de Imagens)", fontsize=11)
+    axes[0].grid(axis="y", linestyle="--", alpha=0.5)
+    axes[0].legend(fontsize=10)
+
+    # --- Subplot 2: Dataset Sintético ---
+    max_s = int(np.max(errors_synth)) if len(errors_synth) > 0 else 10
+    bins_s = np.arange(0, max_s + 2) - 0.5
+    axes[1].hist(
+        errors_synth,
+        bins=bins_s,
+        color="seagreen",
+        edgecolor="black",
+        alpha=0.8,
+        rwidth=0.85
+    )
+    axes[1].axvline(
+        res_synth["mean_count_error"],
+        color="crimson",
+        linestyle="--",
+        linewidth=2,
+        label=f'Média = {res_synth["mean_count_error"]:.2f}'
+    )
+    axes[1].axvline(
+        np.median(errors_synth),
+        color="darkgreen",
+        linestyle=":",
+        linewidth=2,
+        label=f'Mediana = {np.median(errors_synth):.1f}'
+    )
+    axes[1].set_title(
+        f"Erro de Contagem — {nome_synth}\n({titulo_metodo})",
+        fontsize=12,
+        fontweight="bold"
+    )
+    axes[1].set_xlabel("Erro Absoluto (|N_pred - N_gt|)", fontsize=11)
+    axes[1].set_ylabel("Frequência (Nº de Imagens)", fontsize=11)
+    axes[1].grid(axis="y", linestyle="--", alpha=0.5)
+    axes[1].legend(fontsize=10)
+
+    plt.tight_layout()
+    plt.show()
+
