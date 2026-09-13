@@ -225,7 +225,7 @@ def plot_trilha_a_predictions(model, X_test, y_test_gt, device, num_samples=3,
 
 
 def plot_objeto_fronteira_tiles(mosaic_img, mosaic_gt, pred_sem_fusao, pred_com_fusao,
-                                tiles_data, tile_size=128, margin=20):
+                                tiles_data, tile_size=128, margin=20, corrigido=True):
     """
     Parte 4 (Item 3): Mostra detalhadamente o que acontece com um objeto que cai na fronteira entre dois tiles.
     Exibe a imagem geral com os contornos dos tiles, e um zoom na fronteira comparando:
@@ -327,19 +327,15 @@ def plot_objeto_fronteira_tiles(mosaic_img, mosaic_gt, pred_sem_fusao, pred_com_
     plt.title(f'Sem Fusão: CORTADO! ({len(ids_sem)} IDs: {ids_sem})')
     plt.axis('off')
 
-    plt.subplot(2, 3, 6)
-    plt.imshow(crop_img)
-    plt.imshow(np.ma.masked_where(crop_com == 0, crop_com), cmap='nipy_spectral', alpha=0.65)
-    plt.title(f'Com Fusão: UNIFICADO! (1 ID: {ids_com})')
-    plt.axis('off')
+    if corrigido:
+        plt.subplot(2, 3, 6)
+        plt.imshow(crop_img)
+        plt.imshow(np.ma.masked_where(crop_com == 0, crop_com), cmap='nipy_spectral', alpha=0.65)
+        plt.title(f'Com Fusão: UNIFICADO! (1 ID: {ids_com})')
+        plt.axis('off')
 
     plt.tight_layout()
     plt.show()
-
-    print(f"\n--- [Diagnóstico do Objeto na Fronteira (Item 3)] ---")
-    print(f"Objeto GT #{best_uid} localizado na coordenada ({int(cy)}, {int(cx)}):")
-    print(f" - Antes da Fusão (Slide 83): Cortado ao meio em {len(ids_sem)} IDs independentes ({ids_sem}).")
-    print(f" - Após a Fusão (Item 4): Unificado sob o único ID global ({ids_com[0] if len(ids_com) > 0 else 'N/A'}).")
 
 
 def plot_mosaico_completo(mosaic_img, mosaic_gt, pred_sem_fusao, pred_com_fusao):

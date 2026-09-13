@@ -225,30 +225,16 @@ def evaluate_instance_level(model, X, y, device, threshold=0.5, matching_method=
         model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method=matching_method
     )
 
-    print(f"\n--- [Item 3] Avaliação por Instâncias ({dataset_name}) ---")
+    print(f"\nAvaliação por Instâncias ({dataset_name})")
     print("Precisão Média (AP) para cada Limiar de IoU (0.50 a 0.95, passo 0.05):")
     for idx, t in enumerate(iou_thresholds):
         ap_t = results['mean_aps_per_threshold'][idx]
         print(f"  IoU = {t:.2f} : AP = {ap_t:.4f}")
 
-    print(f"\n--> mAP@[.50:.95] Final: {results['mean_mAP']:.4f}")
-    print(f"--> Erro Absoluto Médio de Contagem por Imagem: {results['mean_count_error']:.2f} objetos")
+    print(f"\mAP@[.50:.95] Final: {results['mean_mAP']:.4f}")
+    print(f"Erro Absoluto Médio de Contagem por Imagem: {results['mean_count_error']:.2f} objetos")
 
     return results
-
-
-def compare_matching_methods(model, X, y, device, threshold=0.5, dataset_name="Reais"):
-    """Item 4: Documenta e compara a regra de Matching Guloso vs. Algoritmo Húngaro (Munkres)."""
-    iou_thresholds = np.arange(0.50, 1.00, 0.05)
-    res_greedy = evaluate_model_instances(model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method="greedy")
-    res_hungarian = evaluate_model_instances(model, X, y, device, threshold=threshold, iou_thresholds=iou_thresholds, matching_method="hungarian")
-
-    print(f"\n--- [Item 4] Comparação da Regra de Matching ({dataset_name}) ---")
-    print(f"Guloso (Greedy):    mAP@[.50:.95] = {res_greedy['mean_mAP']:.4f} | Erro Médio Contagem = {res_greedy['mean_count_error']:.2f}")
-    print(f"Húngaro (Hungarian): mAP@[.50:.95] = {res_hungarian['mean_mAP']:.4f} | Erro Médio Contagem = {res_hungarian['mean_count_error']:.2f}")
-    print("Regra de matching documentada e explicitada: Algoritmo Húngaro (Hungarian)")
-
-    return res_greedy, res_hungarian
 
 
 def evaluate_instance_metrics_single_trilha_a(pred_probs, mask_gt_instances,
@@ -363,14 +349,14 @@ def evaluate_instance_level_trilha_a(model, X, y, device, threshold_interior=0.3
         min_marker_size=min_marker_size, iou_thresholds=iou_thresholds, matching_method=matching_method
     )
 
-    print(f"\n--- [Parte 2 - Trilha A] Avaliação por Instâncias ({dataset_name}) ---")
+    print(f"\nAvaliação por Instâncias ({dataset_name})")
     print("Precisão Média (AP) para cada Limiar de IoU (0.50 a 0.95, passo 0.05):")
     for idx, t in enumerate(iou_thresholds):
         ap_t = results['mean_aps_per_threshold'][idx]
         print(f"  IoU = {t:.2f} : AP = {ap_t:.4f}")
 
-    print(f"\n--> mAP@[.50:.95] Trilha A: {results['mean_mAP']:.4f}")
-    print(f"--> Erro Absoluto Médio de Contagem por Imagem: {results['mean_count_error']:.2f} objetos")
+    print(f"\nmAP@[.50:.95] Trilha A: {results['mean_mAP']:.4f}")
+    print(f"Erro Absoluto Médio de Contagem por Imagem: {results['mean_count_error']:.2f} objetos")
 
     return results
 

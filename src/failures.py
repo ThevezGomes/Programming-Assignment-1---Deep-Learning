@@ -194,8 +194,8 @@ def plot_campo_receptivo_vs_dataset(diametros, tabela_rf):
             plt.axvline(rf_val, color=cor, linestyle=estilo, linewidth=2, label=f'RF {label}')
 
         
-    plt.title("Campo Receptivo Teórico do Encoder vs. Distribuição de Diâmetros dos Objetos", fontsize=13, fontweight='bold')
-    plt.xlabel("Diâmetro Equivalente do Objeto (pixels) / Campo Receptivo (pixels)", fontsize=11)
+    plt.title("Distribuição de Diâmetros dos Objetos", fontsize=13, fontweight='bold')
+    plt.xlabel("Diâmetro Equivalente do Objeto (pixels)", fontsize=11)
     plt.ylabel("Densidade de Probabilidade", fontsize=11)
     plt.xlim(0, 100)
     plt.grid(True, linestyle='--', alpha=0.5)
@@ -321,44 +321,31 @@ def minerar_5_falhas_estruturais(model, X_test, y_test_gt, device):
     diagnosticos = [
         (
             "Caso 1 — Núcleo Gigante / Campo Receptivo Local Insuficiente",
-            "O objeto tem diâmetro equivalente elevado (> 35-48 px). O skip connection mais resolutivo (layer1) "
-            "possui campo receptivo teórico de apenas 43 px, de modo que o pixel central nunca enxerga simultaneamente "
-            "as duas margens opostas. O modelo perde a coerência central e gera múltiplos marcadores espúrios, dividindo a célula.",
             idx_c1
         ),
         (
             "Caso 2 — Aglomerado Hiper-Denso de Células Minúsculas",
-            "Aglomerado com dezenas de núcleos colados (diâmetro médio <= 8 px). O stride acumulado no layer2 é 8 px e "
-            "no layer3 é 16 px. A fronteira real entre eles (1 px) é suprimida pelo downsampling convolucional, gerando sub-segmentação "
-            "severa e fusão de várias células sob um único rótulo (número predito muito menor que o real).",
             idx_c2
         ),
         (
             "Caso 3 — Cromatina Heterogênea / Formato Anular ('Donut')",
-            "O núcleo possui interior vacuolado com alta densidade periférica e centro claro. O mapa de probabilidade de interior "
-            "produziu concavidades locais independentes. O watershed ingênuo gerou dois marcadores para um único núcleo biológico.",
             idx_c3
         ),
         (
             "Caso 4 — Baixo Contraste e Variação de Iluminação de Fundo",
-            "Amostra de microscopia com baixo contraste e ruído estocástico de fundo. Gradientes espúrios na matriz extracelular foram "
-            "amplificados pelo peso da classe fronteira (alpha=1.51), induzindo falsos positivos em regiões sem células.",
             idx_c4
         ),
         (
             "Caso 5 — Objeto Fatiado na Margem Externa da Imagem",
-            "Núcleos celulares interceptados pelas bordas da imagem (x=0 ou y=0). O zero-padding convolucional distorce os gradientes de "
-            "ativação e a perda da metade externa impede o fechamento do contorno, resultando em falsos negativos.",
             idx_c5
         )
     ]
     
     casos_info = []
-    for titulo, diag, idx in diagnosticos:
+    for titulo, idx in diagnosticos:
         casos_info.append({
             "idx": idx,
             "titulo": titulo,
-            "diagnostico": diag,
             "img": X_test[idx],
             "gt": y_test_gt[idx],
             "pred": next(m["pred"] for m in metricas if m["idx"] == idx),
@@ -410,8 +397,6 @@ def plot_painel_5_falhas(casos_info):
         plt.suptitle(f"--- {caso['titulo']} ---", fontsize=13, fontweight='bold', y=1.03)
         plt.tight_layout()
         plt.show()
-        
-        print(f"Diagnóstico Técnico: \"{caso['diagnostico']}\"\n" + "-" * 100)
 
 
 # --- 4. Implementação da Correção (Watershed com Supressão por Distância Euclidiana) ---

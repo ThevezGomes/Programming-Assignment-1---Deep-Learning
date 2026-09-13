@@ -27,7 +27,7 @@ try:
         calculate_dice_coefficient, calculate_iou, evaluate_model,
         calculate_instance_iou_matrix, match_instances_greedy, match_instances_hungarian,
         evaluate_instance_metrics_single, evaluate_model_instances, evaluate_instance_level,
-        compare_matching_methods, evaluate_instance_metrics_single_trilha_a,
+        evaluate_instance_metrics_single_trilha_a,
         evaluate_model_instances_trilha_a, evaluate_instance_level_trilha_a,
         compare_baseline_vs_trilha_a, imprimir_tabela_ablação
     )
@@ -68,7 +68,7 @@ except ImportError:
         calculate_dice_coefficient, calculate_iou, evaluate_model,
         calculate_instance_iou_matrix, match_instances_greedy, match_instances_hungarian,
         evaluate_instance_metrics_single, evaluate_model_instances, evaluate_instance_level,
-        compare_matching_methods, evaluate_instance_metrics_single_trilha_a,
+        evaluate_instance_metrics_single_trilha_a,
         evaluate_model_instances_trilha_a, evaluate_instance_level_trilha_a,
         compare_baseline_vs_trilha_a, imprimir_tabela_ablação
     )
