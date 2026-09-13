@@ -468,14 +468,28 @@ def avaliar_e_plotar_correcao(model, X_test, y_test_gt, caso_idx, device=None, m
     
     num_gt = len(np.unique(gt[gt > 0]))
     
-    # Avaliação das métricas
+    # Avaliação das métricas (mAP@[.50:.95], AP@50, AP@75)
+    thresholds = np.arange(0.50, 1.00, 0.05)
+    
     iou_antes = calculate_instance_iou_matrix(gt, num_gt, pred_antes, num_antes)
-    tp_antes = match_instances_hungarian(iou_antes, 0.50) if (num_gt > 0 and num_antes > 0) else 0
-    ap50_antes = tp_antes / (num_antes + num_gt - tp_antes) if (num_antes + num_gt - tp_antes) > 0 else 0.0
+    aps_antes = []
+    for t in thresholds:
+        tp = match_instances_hungarian(iou_antes, t) if (num_gt > 0 and num_antes > 0) else 0
+        denom = num_antes + num_gt - tp
+        aps_antes.append(tp / denom if denom > 0 else 0.0)
+    map_antes = float(np.mean(aps_antes))
+    ap50_antes = float(aps_antes[0])
+    ap75_antes = float(aps_antes[5])
     
     iou_depois = calculate_instance_iou_matrix(gt, num_gt, pred_depois, num_depois)
-    tp_depois = match_instances_hungarian(iou_depois, 0.50) if (num_gt > 0 and num_depois > 0) else 0
-    ap50_depois = tp_depois / (num_depois + num_gt - tp_depois) if (num_depois + num_gt - tp_depois) > 0 else 0.0
+    aps_depois = []
+    for t in thresholds:
+        tp = match_instances_hungarian(iou_depois, t) if (num_gt > 0 and num_depois > 0) else 0
+        denom = num_depois + num_gt - tp
+        aps_depois.append(tp / denom if denom > 0 else 0.0)
+    map_depois = float(np.mean(aps_depois))
+    ap50_depois = float(aps_depois[0])
+    ap75_depois = float(aps_depois[5])
     
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.2))
     axes[0].imshow(img)
@@ -487,31 +501,37 @@ def avaliar_e_plotar_correcao(model, X_test, y_test_gt, caso_idx, device=None, m
     axes[1].axis("off")
     
     axes[2].imshow(pred_antes, cmap="nipy_spectral")
-    axes[2].set_title(f"Antes da Correção ({num_antes} instâncias | AP50: {ap50_antes:.2f})", fontsize=11, fontweight='bold')
+    axes[2].set_title(f"Antes ({num_antes} inst. | mAP: {map_antes:.2f})", fontsize=11, fontweight='bold')
     axes[2].axis("off")
     
     axes[3].imshow(pred_depois, cmap="nipy_spectral")
-    axes[3].set_title(f"Depois da Correção ({num_depois} instâncias | AP50: {ap50_depois:.2f})", fontsize=11, fontweight='bold')
+    axes[3].set_title(f"Depois ({num_depois} inst. | mAP: {map_depois:.2f})", fontsize=11, fontweight='bold')
     axes[3].axis("off")
     
     plt.suptitle("--- VALIDAÇÃO DA CORREÇÃO IMPLEMENTADA (ANTES VS. DEPOIS) ---", fontsize=13, fontweight='bold', y=1.03)
     plt.tight_layout()
     plt.show()
     
-    print("=" * 70)
+    print("=" * 72)
     print("   RESULTADOS DA CORREÇÃO: SUPRESSÃO ADAPTATIVA DE MARCADORES")
-    print("=" * 70)
+    print("=" * 72)
     print(f"Métrica                 | Antes da Correção | Depois da Correção | Ganho")
-    print("-" * 70)
+    print("-" * 72)
+    print(f"mAP@[.50:.95]           | {map_antes:.4f}            | {map_depois:.4f}             | {map_depois - map_antes:+.4f}")
     print(f"AP @ IoU=0.50           | {ap50_antes:.4f}            | {ap50_depois:.4f}             | {ap50_depois - ap50_antes:+.4f}")
+    print(f"AP @ IoU=0.75           | {ap75_antes:.4f}            | {ap75_depois:.4f}             | {ap75_depois - ap75_antes:+.4f}")
     print(f"Instâncias Preditas     | {num_antes:<17} | {num_depois:<18} | {num_depois - num_antes:+d}")
     print(f"Ground Truth (Real)     | {num_gt:<17} | {num_gt:<18} | --")
     print(f"Erro de Contagem        | {abs(num_antes - num_gt):<17} | {abs(num_depois - num_gt):<18} | {abs(num_depois - num_gt) - abs(num_antes - num_gt):+d}")
-    print("=" * 70)
+    print("=" * 72)
     
     return {
+        "map_antes": map_antes,
+        "map_depois": map_depois,
         "ap50_antes": ap50_antes,
         "ap50_depois": ap50_depois,
+        "ap75_antes": ap75_antes,
+        "ap75_depois": ap75_depois,
         "err_antes": abs(num_antes - num_gt),
         "err_depois": abs(num_depois - num_gt)
     }
@@ -594,14 +614,28 @@ def avaliar_e_plotar_correcao_donut(model, X_test, y_test_gt, caso_idx, device=N
 
     num_gt = len(np.unique(gt[gt > 0]))
 
-    # Métricas
+    # Avaliação das métricas (mAP@[.50:.95], AP@50, AP@75)
+    thresholds = np.arange(0.50, 1.00, 0.05)
+
     iou_antes = calculate_instance_iou_matrix(gt, num_gt, pred_antes, num_antes)
-    tp_antes = match_instances_hungarian(iou_antes, 0.50) if (num_gt > 0 and num_antes > 0) else 0
-    ap50_antes = tp_antes / (num_antes + num_gt - tp_antes) if (num_antes + num_gt - tp_antes) > 0 else 0.0
+    aps_antes = []
+    for t in thresholds:
+        tp = match_instances_hungarian(iou_antes, t) if (num_gt > 0 and num_antes > 0) else 0
+        denom = num_antes + num_gt - tp
+        aps_antes.append(tp / denom if denom > 0 else 0.0)
+    map_antes = float(np.mean(aps_antes))
+    ap50_antes = float(aps_antes[0])
+    ap75_antes = float(aps_antes[5])
 
     iou_depois = calculate_instance_iou_matrix(gt, num_gt, pred_depois, num_depois)
-    tp_depois = match_instances_hungarian(iou_depois, 0.50) if (num_gt > 0 and num_depois > 0) else 0
-    ap50_depois = tp_depois / (num_depois + num_gt - tp_depois) if (num_depois + num_gt - tp_depois) > 0 else 0.0
+    aps_depois = []
+    for t in thresholds:
+        tp = match_instances_hungarian(iou_depois, t) if (num_gt > 0 and num_depois > 0) else 0
+        denom = num_depois + num_gt - tp
+        aps_depois.append(tp / denom if denom > 0 else 0.0)
+    map_depois = float(np.mean(aps_depois))
+    ap50_depois = float(aps_depois[0])
+    ap75_depois = float(aps_depois[5])
 
     fig, axes = plt.subplots(1, 4, figsize=(18, 4.2))
     axes[0].imshow(img)
@@ -613,31 +647,37 @@ def avaliar_e_plotar_correcao_donut(model, X_test, y_test_gt, caso_idx, device=N
     axes[1].axis("off")
 
     axes[2].imshow(pred_antes, cmap="nipy_spectral")
-    axes[2].set_title(f"Antes ({num_antes} inst. | AP50: {ap50_antes:.2f})", fontsize=11, fontweight='bold')
+    axes[2].set_title(f"Antes ({num_antes} inst. | mAP: {map_antes:.2f})", fontsize=11, fontweight='bold')
     axes[2].axis("off")
 
     axes[3].imshow(pred_depois, cmap="nipy_spectral")
-    axes[3].set_title(f"Depois ({num_depois} inst. | AP50: {ap50_depois:.2f})", fontsize=11, fontweight='bold')
+    axes[3].set_title(f"Depois ({num_depois} inst. | mAP: {map_depois:.2f})", fontsize=11, fontweight='bold')
     axes[3].axis("off")
 
     plt.suptitle("--- CORREÇÃO: DETECÇÃO DE PICOS NO ANEL (DONUT - AMOSTRA #96) ---", fontsize=13, fontweight='bold', y=1.03)
     plt.tight_layout()
     plt.show()
 
-    print("=" * 70)
+    print("=" * 72)
     print("   RESULTADOS: RECUPERAÇÃO DE SEMENTES NO ANEL (DONUT - AMOSTRA #96)")
-    print("=" * 70)
+    print("=" * 72)
     print(f"Métrica                 | Antes da Correção | Depois da Correção | Ganho")
-    print("-" * 70)
+    print("-" * 72)
+    print(f"mAP@[.50:.95]           | {map_antes:.4f}            | {map_depois:.4f}             | {map_depois - map_antes:+.4f}")
     print(f"AP @ IoU=0.50           | {ap50_antes:.4f}            | {ap50_depois:.4f}             | {ap50_depois - ap50_antes:+.4f}")
+    print(f"AP @ IoU=0.75           | {ap75_antes:.4f}            | {ap75_depois:.4f}             | {ap75_depois - ap75_antes:+.4f}")
     print(f"Instâncias Preditas     | {num_antes:<17} | {num_depois:<18} | {num_depois - num_antes:+d}")
     print(f"Ground Truth (Real)     | {num_gt:<17} | {num_gt:<18} | --")
     print(f"Erro de Contagem        | {abs(num_antes - num_gt):<17} | {abs(num_depois - num_gt):<18} | {abs(num_depois - num_gt) - abs(num_antes - num_gt):+d}")
-    print("=" * 70)
+    print("=" * 72)
 
     return {
+        "map_antes": map_antes,
+        "map_depois": map_depois,
         "ap50_antes": ap50_antes,
         "ap50_depois": ap50_depois,
+        "ap75_antes": ap75_antes,
+        "ap75_depois": ap75_depois,
         "err_antes": abs(num_antes - num_gt),
         "err_depois": abs(num_depois - num_gt)
     }
