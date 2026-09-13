@@ -49,7 +49,8 @@ try:
         calcular_campo_receptivo_resnet18, calcular_campo_receptivo_atrous,
         imprimir_tabela_campo_receptivo, extrair_diametros_objetos,
         plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
-        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
+        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao,
+        decodificar_watershed_donut_anular, avaliar_e_plotar_correcao_donut
     )
     from .stress import (
         filtrar_por_modalidade, treinar_modelo_modalidade,
@@ -94,7 +95,8 @@ except ImportError:
         calcular_campo_receptivo_resnet18, calcular_campo_receptivo_atrous,
         imprimir_tabela_campo_receptivo, extrair_diametros_objetos,
         plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
-        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
+        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao,
+        decodificar_watershed_donut_anular, avaliar_e_plotar_correcao_donut
     )
     from stress import (
         filtrar_por_modalidade, treinar_modelo_modalidade,
