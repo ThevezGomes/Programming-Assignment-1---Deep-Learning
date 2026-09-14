@@ -209,8 +209,6 @@ def plot_campo_receptivo_vs_dataset(diametros, tabela_rf):
     print(f"Diâmetro Médio: {np.mean(diametros):.2f} px | Mediana: {np.median(diametros):.2f} px | Máximo: {np.max(diametros):.2f} px")
     print(f"Núcleos com diâmetro <= RF Skip L1 ({rf_l1} px) : {np.sum(diametros <= rf_l1):5d} / {len(diametros)} ({np.mean(diametros <= rf_l1)*100:6.2f}%)")
     print(f"Núcleos com diâmetro <= RF Skip L2 ({rf_l2} px) : {np.sum(diametros <= rf_l2):5d} / {len(diametros)} ({np.mean(diametros <= rf_l2)*100:6.2f}%)")
-    print(f"Diagnóstico Teórico: Objetos gigantes (> 30 px) aproximam-se do limiar de visão da Skip L1,")
-    print(f"exigindo que o modelo recorra aos níveis mais profundos (L2/L3) para contextualização global.")
     print("=" * 75)
 
 
@@ -312,11 +310,11 @@ def minerar_5_falhas_estruturais(model, X_test, y_test_gt, device=None):
             idx_c1
         ),
         (
-            "Caso 2 — Aglomerado Hiper-Denso de Células Minúsculas",
+            "Caso 2 — Aglomerado de Células Minúsculas",
             idx_c2
         ),
         (
-            "Caso 3 — Cromatina Heterogênea / Formato Anular ('Donut')",
+            "Caso 3 — Formato Anelar ('Donut')",
             idx_c3
         ),
         (
