@@ -121,9 +121,9 @@ class Dataset:
             stratify=stratify
         )
 
-        self.y_train = gerar_alvos_trilha_a(self.y_train, border_thickness=1)
-        self.y_val = gerar_alvos_trilha_a(self.y_val, border_thickness=1)
-        self.y_test = gerar_alvos_trilha_a(self.y_test, border_thickness=1)
+        self.y_train_3c = gerar_alvos_trilha_a(self.y_train, border_thickness=1)
+        self.y_val_3c = gerar_alvos_trilha_a(self.y_val, border_thickness=1)
+        self.y_test_3c = gerar_alvos_trilha_a(self.y_test, border_thickness=1)
 
 class Model:
     def __init__(self, device=get_device(), in_channels=32, out_channels=3, head_type="conv1x1", pretrained=True, freeze_backbone=True):
@@ -132,13 +132,13 @@ class Model:
         self.model = UNetResNet(head=self.head, pretrained=pretrained, freeze_backbone=freeze_backbone)  
 
     def train(self, dataset, gamma=0.0, epochs_phase1=10, epochs_phase2=10, batch_size=16, lr_phase1=0.001, lr_phase2=0.0001):
-        self.class_weights = calcular_pesos_classes_trilha_a(dataset.y_train)
+        self.class_weights = calcular_pesos_classes_trilha_a(dataset.y_train_3c)
         train_model_trilha_a_twophase(
             self.model, 
             dataset.X_train, 
-            dataset.y_train, 
+            dataset.y_train_3c, 
             dataset.X_val, 
-            dataset.y_val, 
+            dataset.y_val_3c, 
             device=self.device,
             class_weights=self.class_weights, 
             gamma=gamma,
