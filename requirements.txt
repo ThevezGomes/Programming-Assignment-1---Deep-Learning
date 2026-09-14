@@ -1,0 +1,30 @@
+# ==============================================================================
+# FGV - Aprendizado Profundo (Programming Assignment 1)
+# Dependências do Projeto: Segmentação de Instâncias DSB2018
+# ==============================================================================
+
+# Core Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
+
+# Computação Científica e Manipulação de Dados
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Processamento de Imagens e Visão Computacional
+scikit-image>=0.20.0
+opencv-python>=4.8.0
+pillow>=9.5.0
+imageio>=2.30.0
+tifffile>=2023.0.0
+
+# Visualização e Gráficos
+matplotlib>=3.7.0
+
+# Ambiente Interativo e Notebooks
+jupyter>=1.0.0
+ipykernel>=6.20.0
+
+# Utilitários e Progresso
+tqdm>=4.65.0
+PyYAML>=6.0
