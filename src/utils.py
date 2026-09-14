@@ -94,4 +94,62 @@ except ImportError:
         plot_comparacao_estresse_modalidade
     )
 
+class Dataset:
+    def __init__(self, stage1_path="data/stage1_train"):
+        self.stage1_path = stage1_path
 
+    def get_data(self, target_size=(128, 128)):
+        self.images_real, self.masks_real = carregar_dataset_real(self.stage1_path, target_size=target_size)
+
+    def split_data(self, train_ratio=0.70, val_ratio=0.15, seed=42, stratify=True):
+        self.X_train, self.y_train, self.X_val, self.y_val, self.X_test, self.y_test = split_dataset(
+            self.images_real,
+            self.masks_real,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            seed=seed,
+            stratify=stratify
+        )
+
+        self.y_train = gerar_alvos_trilha_a(self.y_train, border_thickness=1)
+        self.y_val = gerar_alvos_trilha_a(self.y_val, border_thickness=1)
+        self.y_test = gerar_alvos_trilha_a(self.y_test, border_thickness=1)
+
+class Model:
+    def __init__(self, device=get_device(), in_channels=32, out_channels=3, head_type="conv1x1", pretrained=True, freeze_backbone=True):
+        self.device = device
+        self.head = create_segmentation_head(in_channels=in_channels, out_channels=out_channels, head_type=head_type)
+        self.model = UNetResNet(head=self.head, pretrained=pretrained, freeze_backbone=freeze_backbone)  
+
+    def train(self, dataset, gamma=0.0, epochs_phase1=10, epochs_phase2=10, batch_size=16, lr_phase1=0.001, lr_phase2=0.0001):
+        self.class_weights = calcular_pesos_classes_trilha_a(dataset.y_train)
+        train_model_trilha_a_twophase(
+            self.model, 
+            dataset.X_train, 
+            dataset.y_train, 
+            dataset.X_val, 
+            dataset.y_val, 
+            device=self.device,
+            class_weights=self.class_weights, 
+            gamma=gamma,
+            epochs_phase1=epochs_phase1, 
+            epochs_phase2=epochs_phase2,
+            batch_size=batch_size, 
+            lr_phase1=lr_phase1, 
+            lr_phase2=lr_phase2
+        )
+
+    def evaluate(self, dataset, threshold_interior=0.35, threshold_fg=0.35, matching_method="hungarian"):
+        dice_r, iou_r = evaluate_model(self.model, dataset.X_test, dataset.y_test, device=self.device, batch_size=16)
+        print(f"\nMean Dice: {dice_r:.4f} | Mean IoU: {iou_r:.4f}")
+        res_evaluate_model = evaluate_instance_level_trilha_a(
+            self.model, 
+            dataset.X_test, 
+            dataset.y_test, 
+            device=self.device, 
+            threshold_interior=threshold_interior, 
+            threshold_fg=threshold_fg, 
+            matching_method=matching_method, 
+            dataset_name="Reais (DSB2018)"
+        )
+        return dice_r, iou_r, res_evaluate_model

@@ -231,7 +231,7 @@ def evaluate_instance_level(model, X, y, device, threshold=0.5, matching_method=
         ap_t = results['mean_aps_per_threshold'][idx]
         print(f"  IoU = {t:.2f} : AP = {ap_t:.4f}")
 
-    print(f"\mAP@[.50:.95] Final: {results['mean_mAP']:.4f}")
+    print(f"\nmAP@[.50:.95] Final: {results['mean_mAP']:.4f}")
     print(f"Erro Absoluto Médio de Contagem por Imagem: {results['mean_count_error']:.2f} objetos")
 
     return results
