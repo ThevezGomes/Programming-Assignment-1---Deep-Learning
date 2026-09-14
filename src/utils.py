@@ -31,7 +31,10 @@ try:
         evaluate_model_instances_trilha_a, evaluate_instance_level_trilha_a,
         compare_baseline_vs_trilha_a, imprimir_tabela_ablação
     )
-    from .training import train_model, train_model_trilha_a, train_model_trilha_a_twophase, rodar_ablação_seeds
+    from .training import (
+        train_model, train_model_trilha_a, train_model_trilha_a_twophase, rodar_ablação_seeds,
+        treinar_e_avaliar_sintetico_baseline, treinar_e_avaliar_sintetico_trilha_a
+    )
     from .mosaic import (
         DisjointSetUnion, criar_mosaico_imagens, inferencia_mosaico_tiles,
         fundir_instancias_tiles, avaliar_e_comparar_mosaico
@@ -39,13 +42,15 @@ try:
     from .visualization import (
         plot_dataset_samples, plot_predictions, plot_naive_instance_extraction,
         plot_quantify_failure, plot_trilha_a_samples, plot_trilha_a_predictions,
-        plot_objeto_fronteira_tiles, plot_mosaico_completo
+        plot_objeto_fronteira_tiles, plot_mosaico_completo,
+        avaliar_e_plotar_comparativo_instancias
     )
     from .failures import (
         calcular_campo_receptivo_resnet18, calcular_campo_receptivo_atrous,
         imprimir_tabela_campo_receptivo, extrair_diametros_objetos,
         plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
-        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
+        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao,
+        decodificar_watershed_donut_anular, avaliar_e_plotar_correcao_donut
     )
     from .stress import (
         filtrar_por_modalidade, treinar_modelo_modalidade,
@@ -72,7 +77,10 @@ except ImportError:
         evaluate_model_instances_trilha_a, evaluate_instance_level_trilha_a,
         compare_baseline_vs_trilha_a, imprimir_tabela_ablação
     )
-    from training import train_model, train_model_trilha_a, train_model_trilha_a_twophase, rodar_ablação_seeds
+    from training import (
+        train_model, train_model_trilha_a, train_model_trilha_a_twophase, rodar_ablação_seeds,
+        treinar_e_avaliar_sintetico_baseline, treinar_e_avaliar_sintetico_trilha_a
+    )
     from mosaic import (
         DisjointSetUnion, criar_mosaico_imagens, inferencia_mosaico_tiles,
         fundir_instancias_tiles, avaliar_e_comparar_mosaico
@@ -80,13 +88,15 @@ except ImportError:
     from visualization import (
         plot_dataset_samples, plot_predictions, plot_naive_instance_extraction,
         plot_quantify_failure, plot_trilha_a_samples, plot_trilha_a_predictions,
-        plot_objeto_fronteira_tiles, plot_mosaico_completo
+        plot_objeto_fronteira_tiles, plot_mosaico_completo,
+        avaliar_e_plotar_comparativo_instancias
     )
     from failures import (
         calcular_campo_receptivo_resnet18, calcular_campo_receptivo_atrous,
         imprimir_tabela_campo_receptivo, extrair_diametros_objetos,
         plot_campo_receptivo_vs_dataset, minerar_5_falhas_estruturais,
-        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao
+        plot_painel_5_falhas, decodificar_watershed_adaptativo, avaliar_e_plotar_correcao,
+        decodificar_watershed_donut_anular, avaliar_e_plotar_correcao_donut
     )
     from stress import (
         filtrar_por_modalidade, treinar_modelo_modalidade,
